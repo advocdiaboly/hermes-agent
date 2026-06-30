@@ -346,6 +346,7 @@ def finalize_turn(
         "prompt_tokens": agent.session_prompt_tokens,
         "completion_tokens": agent.session_completion_tokens,
         "total_tokens": agent.session_total_tokens,
+        "first_prompt_tokens": getattr(agent, "first_prompt_tokens", 0) or 0,
         "last_prompt_tokens": getattr(agent.context_compressor, "last_prompt_tokens", 0) or 0,
         "estimated_cost_usd": agent.session_estimated_cost_usd,
         "cost_status": agent.session_cost_status,
@@ -354,6 +355,12 @@ def finalize_turn(
     }
     if agent._tool_guardrail_halt_decision is not None:
         result["guardrail"] = agent._tool_guardrail_halt_decision.to_metadata()
+    try:
+        from agent.router_feedback import finish_turn as _router_feedback_finish
+
+        _router_feedback_finish(agent, result)
+    except Exception as _feedback_exc:
+        logger.debug("router feedback finish failed: %s", _feedback_exc)
     # If a /steer landed after the final assistant turn (no more tool
     # batches to drain into), hand it back to the caller so it can be
     # delivered as the next user turn instead of being silently lost.

@@ -223,6 +223,10 @@ def init_agent(
     checkpoint_max_total_size_mb: int = 500,
     checkpoint_max_file_size_mb: int = 10,
     pass_session_id: bool = False,
+    # --- Phase 2.5: Router-first toolset prediction ---
+    router_config: Optional[Dict[str, Any]] = None,
+    router_user_message: Optional[str] = None,
+    enabled_toolsets_explicit: bool = False,
 ):
     """
     Initialize the AI Agent.
@@ -953,12 +957,101 @@ def init_agent(
             print(f"🔄 Fallback chain ({len(agent._fallback_chain)} providers): " +
                   " → ".join(f"{f['model']} ({f['provider']})" for f in agent._fallback_chain))
 
-    # Get available tools with filtering
+    # Get available tools with filtering.
+    # --- Phase 2.5: Router-first toolset policy ---
+    # Keep policy decisions behind a small seam so local routing experiments can
+    # live outside the repo (see agent.toolset_policy).
+    _effective_enabled = enabled_toolsets
+    _router_predicted = False
+    _policy_result = None
+    _merge_skill_required = True
+    if router_config is None:
+        try:
+            from hermes_cli.config import load_config as _load_config
+            _cfg = _load_config()
+            if isinstance(_cfg, dict):
+                router_config = _cfg.get("router_classifier")
+        except Exception:
+            pass
+    try:
+        from agent.toolset_policy import resolve_effective_toolsets
+        from toolsets import get_all_toolsets
+
+        _available = {
+            name: info.get("description", name)
+            for name, info in get_all_toolsets().items()
+        }
+        _policy_result = resolve_effective_toolsets(
+            user_message=router_user_message,
+            router_config=router_config,
+            available_toolsets=_available,
+            platform_toolsets=enabled_toolsets,
+            enabled_toolsets_explicit=enabled_toolsets_explicit,
+            disabled_toolsets=disabled_toolsets,
+            platform=platform,
+        )
+        _effective_enabled = _policy_result.enabled_toolsets
+        _router_predicted = bool(_policy_result.router_predicted_toolsets)
+        _merge_skill_required = bool(_policy_result.merge_skill_required)
+        agent._router_policy_source = _policy_result.source
+        agent._router_policy_cache_fragment = dict(_policy_result.cache_fragment or {})
+        if _router_predicted and not agent.quiet_mode:
+            label = ', '.join(_policy_result.router_predicted_toolsets or []) or "none"
+            print(f"🔮 Router predicted toolsets: {label}")
+    except Exception as exc:
+        logger.warning("toolset policy failed, falling back to configured tools: %s", exc)
+        _router_predicted = False
+
+    agent._router_predicted_toolsets = _effective_enabled if _router_predicted else None
+    # Phase B: recall-on-miss guard — track which toolsets have already
+    # been rehydrated so each missing toolset can recover once per session.
+    agent._router_recalled_toolsets = set()
+
     agent.tools = _ra().get_tool_definitions(
-        enabled_toolsets=enabled_toolsets,
+        enabled_toolsets=_effective_enabled,
         disabled_toolsets=disabled_toolsets,
         quiet_mode=agent.quiet_mode,
     )
+
+    # Record router decision metadata
+    try:
+        import hashlib as _hashlib
+        import json as _json
+
+        _message_hash = ""
+        if router_user_message:
+            _message_hash = _hashlib.sha256(str(router_user_message).encode("utf-8")).hexdigest()
+        _effective_for_log = None if _effective_enabled is None else list(_effective_enabled)
+        _predicted_for_log = (
+            list(_policy_result.router_predicted_toolsets or [])
+            if _policy_result is not None
+            else None
+        )
+        agent._router_toolset_telemetry = {
+            "router_enabled": bool((router_config or {}).get("enabled")),
+            "message_sha256": _message_hash,
+            "platform": platform or "",
+            "policy_source": getattr(_policy_result, "source", None) if _policy_result is not None else None,
+            "explicit_toolsets": bool(enabled_toolsets_explicit),
+            "platform_toolsets": list(enabled_toolsets or []),
+            "predicted_toolsets": _predicted_for_log,
+            "effective_toolsets": _effective_for_log,
+            "full_surface": _effective_enabled is None,
+            "loaded_tool_count": len(agent.tools or []),
+            "recalled_toolsets": [],
+        }
+        logger.debug(
+            "router_toolset_decision %s",
+            _json.dumps(agent._router_toolset_telemetry, sort_keys=True),
+        )
+        try:
+            from agent.router_feedback import start_turn as _router_feedback_start
+
+            _router_feedback_start(agent, user_message=router_user_message)
+        except Exception:
+            pass
+    except Exception as _tel_exc:
+        logger.debug("router telemetry failed: %s", _tel_exc)
     
     # Show tool configuration and store valid tool names for validation
     agent.valid_tool_names = set()
@@ -1621,6 +1714,7 @@ def init_agent(
     agent.session_completion_tokens = 0
     agent.session_total_tokens = 0
     agent.session_api_calls = 0
+    agent.first_prompt_tokens = 0
     agent.session_input_tokens = 0
     agent.session_output_tokens = 0
     agent.session_cache_read_tokens = 0

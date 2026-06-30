@@ -3730,6 +3730,58 @@ def run_conversation(
                     if tc.function.name not in agent.valid_tool_names
                 ]
                 if invalid_tool_calls:
+                    try:
+                        from agent.router_feedback import record_event as _router_feedback_event
+
+                        _router_feedback_event(
+                            agent,
+                            "invalid_tool_call",
+                            tool=invalid_tool_calls[0],
+                            valid_tool_count=len(agent.valid_tool_names or []),
+                        )
+                    except Exception:
+                        pass
+                    # ── Phase B: Router recall-on-miss ────────────────────
+                    # If the model tried a tool that was excluded by the
+                    # router (not in predicted toolsets but exists in the
+                    # full catalog), rehydrate to the full toolset and retry
+                    # this turn instead of returning an error to the model.
+                    _recall_triggered = False
+                    _first_invalid = invalid_tool_calls[0]
+                    try:
+                        from agent.toolset_router import (
+                            expand_tools_on_router_recall,
+                            get_missing_router_toolset_for_tool,
+                        )
+                        _missed_ts = get_missing_router_toolset_for_tool(
+                            _first_invalid, agent,
+                        )
+                        if _missed_ts and expand_tools_on_router_recall(
+                            agent, _missed_ts,
+                        ):
+                            _recall_triggered = True
+                    except Exception:
+                        pass  # fall through to standard error path
+
+                    if _recall_triggered:
+                        # Strip the assistant message from messages if it was appended.
+                        if (
+                            messages
+                            and messages[-1].get("role") == "assistant"
+                            and messages[-1].get("tool_calls")
+                        ):
+                            messages.pop()
+                        # Don't increment api_call_count for the recall —
+                        # the next iteration will re-fetch with full tools.
+                        api_call_count -= 1
+                        agent.iteration_budget.refund()
+                        agent._vprint(
+                            f"{agent.log_prefix}🔄 Router recall: expanding to full "
+                            f"toolset ({len(agent.tools)} tools) and retrying...",
+                            force=True,
+                        )
+                        continue
+
                     # Track retries for invalid tool calls
                     agent._invalid_tool_retries += 1
 
