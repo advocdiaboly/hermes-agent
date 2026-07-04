@@ -1216,6 +1216,27 @@ def test_get_platform_tools_recovers_non_configurable_toolsets_from_composite():
     assert "terminal" in enabled
 
 
+def test_get_platform_tools_recovers_telegram_topic_lifecycle_for_telegram():
+    """Telegram's default composite should expose its topic lifecycle tools."""
+    enabled = _get_platform_tools({}, "telegram", include_default_mcp_servers=False)
+
+    assert "telegram_topic_lifecycle" in enabled
+
+    from model_tools import get_tool_definitions
+
+    definitions = get_tool_definitions(
+        enabled_toolsets=sorted(enabled),
+        quiet_mode=True,
+        skip_tool_search_assembly=True,
+    )
+    tool_names = {d["function"]["name"] for d in definitions}
+    assert {
+        "telegram_topic_status",
+        "telegram_topic_manage",
+        "telegram_pin_manage",
+    }.issubset(tool_names)
+
+
 def test_get_platform_tools_second_pass_skips_fully_claimed_toolsets():
     """Toolsets whose tools are fully covered by configurable keys should NOT
     be added by the second pass (prevents 'search', 'hermes-acp' noise).
@@ -1540,5 +1561,4 @@ def test_real_configurable_changes_still_reported_in_diff():
     # User adds 'vision' (configurable) — must still report as added.
     new_enabled2 = (current - {"kanban"}) | {"vision"}
     assert ((new_enabled2 - current) & universe) == {"vision"}
-
 

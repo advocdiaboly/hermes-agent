@@ -437,10 +437,20 @@ TOOLSETS = {
         "includes": []
     },
 
+    "telegram_topic_lifecycle": {
+        "description": "Telegram topic lifecycle primitives for managed topic/session and pinned-marker operations",
+        "tools": [
+            "telegram_topic_status",
+            "telegram_topic_manage",
+            "telegram_pin_manage",
+        ],
+        "includes": []
+    },
+
     "hermes-telegram": {
         "description": "Telegram bot toolset - full access for personal use (terminal has safety checks)",
         "tools": _HERMES_CORE_TOOLS,
-        "includes": []
+        "includes": ["telegram_topic_lifecycle"]
     },
     
     "hermes-discord": {

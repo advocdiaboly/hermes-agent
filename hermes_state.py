@@ -4513,6 +4513,196 @@ class SessionDB:
                 return None
         return dict(row) if row else None
 
+    def apply_telegram_pinned_marker_migration(self) -> None:
+        """Create the managed Telegram pinned-marker overlay table.
+
+        This table indexes markers Hermes created or that the operator
+        explicitly recorded. It is intentionally separate from
+        telegram_dm_topic_bindings: bindings own routing, pinned markers own
+        recoverable human/agent-visible topic context.
+        """
+        def _do(conn):
+            conn.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS telegram_pinned_markers (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    chat_id TEXT NOT NULL,
+                    thread_id TEXT,
+                    message_id TEXT NOT NULL,
+                    session_id TEXT,
+                    kind TEXT NOT NULL,
+                    label TEXT,
+                    text_snapshot TEXT,
+                    metadata_json TEXT NOT NULL DEFAULT '{}',
+                    state TEXT NOT NULL DEFAULT 'pinned',
+                    approved_by TEXT,
+                    approval_ref TEXT,
+                    approval_text_excerpt TEXT,
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL,
+                    UNIQUE(chat_id, message_id)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_telegram_pinned_markers_context
+                ON telegram_pinned_markers(chat_id, thread_id, state, updated_at);
+
+                CREATE INDEX IF NOT EXISTS idx_telegram_pinned_markers_session
+                ON telegram_pinned_markers(session_id, updated_at);
+                """
+            )
+        self._execute_write(_do)
+
+    @staticmethod
+    def _telegram_pinned_marker_from_row(row) -> Dict[str, Any]:
+        marker = dict(row)
+        raw_metadata = marker.pop("metadata_json", None) or "{}"
+        try:
+            metadata = json.loads(raw_metadata)
+        except Exception:
+            metadata = {}
+        marker["metadata"] = metadata if isinstance(metadata, dict) else {}
+        return marker
+
+    def record_telegram_pinned_marker(
+        self,
+        *,
+        chat_id: str,
+        message_id: str,
+        kind: str,
+        thread_id: Optional[str] = None,
+        label: Optional[str] = None,
+        text_snapshot: Optional[str] = None,
+        session_id: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        state: str = "pinned",
+        approved_by: Optional[str] = None,
+        approval_ref: Optional[str] = None,
+        approval_text_excerpt: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Insert or update one known Telegram pinned marker."""
+        self.apply_telegram_pinned_marker_migration()
+        now = time.time()
+        metadata_json = json.dumps(metadata or {}, ensure_ascii=False, sort_keys=True)
+
+        def _do(conn):
+            conn.execute(
+                """
+                INSERT INTO telegram_pinned_markers (
+                    chat_id, thread_id, message_id, session_id, kind, label,
+                    text_snapshot, metadata_json, state, approved_by,
+                    approval_ref, approval_text_excerpt, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(chat_id, message_id) DO UPDATE SET
+                    thread_id = excluded.thread_id,
+                    session_id = excluded.session_id,
+                    kind = excluded.kind,
+                    label = excluded.label,
+                    text_snapshot = excluded.text_snapshot,
+                    metadata_json = excluded.metadata_json,
+                    state = excluded.state,
+                    approved_by = excluded.approved_by,
+                    approval_ref = excluded.approval_ref,
+                    approval_text_excerpt = excluded.approval_text_excerpt,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    str(chat_id),
+                    str(thread_id) if thread_id is not None else None,
+                    str(message_id),
+                    str(session_id) if session_id is not None else None,
+                    str(kind),
+                    label,
+                    text_snapshot,
+                    metadata_json,
+                    str(state),
+                    approved_by,
+                    approval_ref,
+                    approval_text_excerpt,
+                    now,
+                    now,
+                ),
+            )
+            return conn.execute(
+                """
+                SELECT * FROM telegram_pinned_markers
+                WHERE chat_id = ? AND message_id = ?
+                """,
+                (str(chat_id), str(message_id)),
+            ).fetchone()
+
+        row = self._execute_write(_do)
+        return self._telegram_pinned_marker_from_row(row)
+
+    def list_telegram_pinned_markers(
+        self,
+        *,
+        chat_id: str,
+        thread_id: Optional[str] = None,
+        session_id: Optional[str] = None,
+        state: Optional[str] = None,
+        include_unpinned: bool = False,
+    ) -> List[Dict[str, Any]]:
+        """Return known pinned-marker metadata without creating the table."""
+        clauses = ["chat_id = ?"]
+        params: List[Any] = [str(chat_id)]
+        if thread_id is not None:
+            clauses.append("thread_id = ?")
+            params.append(str(thread_id))
+        if session_id is not None:
+            clauses.append("session_id = ?")
+            params.append(str(session_id))
+        if state is not None:
+            clauses.append("state = ?")
+            params.append(str(state))
+        elif not include_unpinned:
+            clauses.append("state = ?")
+            params.append("pinned")
+
+        with self._lock:
+            try:
+                rows = self._conn.execute(
+                    "SELECT * FROM telegram_pinned_markers "
+                    f"WHERE {' AND '.join(clauses)} "
+                    "ORDER BY updated_at DESC, id DESC",
+                    params,
+                ).fetchall()
+            except sqlite3.OperationalError:
+                return []
+        return [self._telegram_pinned_marker_from_row(row) for row in rows]
+
+    def update_telegram_pinned_marker_state(
+        self,
+        *,
+        chat_id: str,
+        message_id: str,
+        state: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Update one known marker state; return None if the overlay is absent."""
+        now = time.time()
+
+        def _do(conn):
+            try:
+                conn.execute(
+                    """
+                    UPDATE telegram_pinned_markers
+                    SET state = ?, updated_at = ?
+                    WHERE chat_id = ? AND message_id = ?
+                    """,
+                    (str(state), now, str(chat_id), str(message_id)),
+                )
+                return conn.execute(
+                    """
+                    SELECT * FROM telegram_pinned_markers
+                    WHERE chat_id = ? AND message_id = ?
+                    """,
+                    (str(chat_id), str(message_id)),
+                ).fetchone()
+            except sqlite3.OperationalError:
+                return None
+
+        row = self._execute_write(_do)
+        return self._telegram_pinned_marker_from_row(row) if row else None
+
     def bind_telegram_topic(
         self,
         *,
