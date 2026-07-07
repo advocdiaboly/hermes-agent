@@ -1,11 +1,14 @@
 import json
 
+import pytest
+
 from gateway.session_context import clear_session_vars, set_session_vars
 from hermes_state import SessionDB
 from tools.telegram_topic_lifecycle_tool import (
     TELEGRAM_PIN_MANAGE_SCHEMA,
     TELEGRAM_TOPIC_MANAGE_SCHEMA,
     TELEGRAM_TOPIC_STATUS_SCHEMA,
+    _run_maybe_awaitable,
     telegram_pin_manage,
     telegram_topic_manage,
     telegram_topic_status,
@@ -39,6 +42,14 @@ class FakeTelegramLifecycleClient:
 
 def _decode(result):
     return json.loads(result) if isinstance(result, str) else result
+
+
+def test_run_maybe_awaitable_preserves_original_coroutine_error():
+    async def fails_once():
+        raise RuntimeError("telegram api failed")
+
+    with pytest.raises(RuntimeError, match="telegram api failed"):
+        _run_maybe_awaitable(fails_once())
 
 
 def test_tool_schemas_are_narrow_and_registered_to_one_toolset():

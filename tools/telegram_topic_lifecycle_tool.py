@@ -161,12 +161,11 @@ def _run_maybe_awaitable(value):
         return value
     try:
         from model_tools import _run_async
-
-        return _run_async(value)
-    except Exception:
+    except ImportError:
         import asyncio
 
         return asyncio.run(value)
+    return _run_async(value)
 
 
 def _coerce_chat_id(value: str):
