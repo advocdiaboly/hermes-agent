@@ -438,11 +438,10 @@ TOOLSETS = {
     },
 
     "telegram_topic_lifecycle": {
-        "description": "Telegram topic lifecycle primitives for managed topic/session and pinned-marker operations",
+        "description": "Telegram topic lifecycle primitives for managed topic/session operations",
         "tools": [
             "telegram_topic_status",
             "telegram_topic_manage",
-            "telegram_pin_manage",
         ],
         "includes": []
     },

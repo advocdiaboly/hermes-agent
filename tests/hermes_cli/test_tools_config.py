@@ -1233,8 +1233,8 @@ def test_get_platform_tools_recovers_telegram_topic_lifecycle_for_telegram():
     assert {
         "telegram_topic_status",
         "telegram_topic_manage",
-        "telegram_pin_manage",
     }.issubset(tool_names)
+    assert "telegram_pin_manage" not in tool_names
 
 
 def test_get_platform_tools_second_pass_skips_fully_claimed_toolsets():
@@ -1561,4 +1561,3 @@ def test_real_configurable_changes_still_reported_in_diff():
     # User adds 'vision' (configurable) — must still report as added.
     new_enabled2 = (current - {"kanban"}) | {"vision"}
     assert ((new_enabled2 - current) & universe) == {"vision"}
-

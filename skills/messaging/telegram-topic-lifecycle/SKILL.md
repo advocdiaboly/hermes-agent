@@ -1,11 +1,20 @@
 ---
 name: telegram-topic-lifecycle
-description: Use when managing Telegram DM topics, topic titles, pinned bootstrap markers, topic/session bindings, or recoverable topic context in Hermes.
+description: Use when managing Telegram private topics, supergroup forum topics, topic titles, or topic/session bindings in Hermes.
 ---
 
 # Telegram Topic Lifecycle
 
-Use this skill only in Telegram sessions where topic structure, topic naming, pinned markers, or topic/session bindings matter.
+Use this skill only in Telegram sessions where topic structure, topic naming, or topic/session bindings matter.
+
+## Product Model
+
+- Private-DM topics remain a supported personal-topic surface.
+- Supergroup/forum topics are reliable when the operator explicitly chooses a group-based workflow; do not pressure migration between surfaces.
+- In supergroup/forum topics, each Telegram topic is its own Hermes session by default.
+- A binding row is lifecycle metadata unless `telegram_topic_status.binding_status` is `matches_routing`.
+- `topic_mode_enabled=false` only means private-DM topic mode is off; it does not mean supergroup/forum topic support is unavailable.
+- Telegram pinned-message memory is not a supported lifecycle primitive. Telegram Bot API and client behavior do not provide a consistent full pin/unpin model for this workflow.
 
 ## Core Rule
 
@@ -14,7 +23,7 @@ Discuss lifecycle choices in chat first; call tools only for operations chat can
 ## When To Suggest A Topic
 
 - Suggest a new topic for long-lived project work, repeated research, incidents, or context that should survive across sessions.
-- Reuse an existing topic when the work clearly belongs to that topic's pinned marker scope.
+- Reuse an existing topic when the work clearly belongs to that topic's current session.
 - Do not create duplicate topics for a naming preference alone.
 
 ## Naming
@@ -23,29 +32,17 @@ Discuss lifecycle choices in chat first; call tools only for operations chat can
 - Use prefixes when they clarify intent: `[Проект]`, `[Ad-hoc]`, `[Исследование]`, `[Hermes]`.
 - Keep established technical names in English when translating would reduce clarity.
 
-## Pinned Markers
-
-Pinned Telegram messages are local memory markers visible to both the operator and Hermes. A topic passport is the default bootstrap marker kind, not a special low-level operation.
-
-Default topic passport content:
-
-- purpose;
-- scope and non-goals;
-- key repos, links, and tasks;
-- lifecycle state;
-- routing hints for future sessions;
-- operator expectations.
-
-Allowed marker kinds include `topic_passport`, `decision`, `context`, `warning`, and `todo`.
-
 ## Tool Use
 
 1. Call `telegram_topic_status` before proposing a structural action.
-2. Propose the exact title, operation, and marker text in chat.
-3. Wait for explicit operator approval.
-4. For topic/session operations, call `telegram_topic_manage` with approval metadata.
-5. For pinned markers, call `telegram_pin_manage` with approval metadata.
-6. Treat `list_known_pins` as a Hermes-maintained index, not the complete Telegram pinned-message list.
+2. Read `surface`, `routing`, `binding_status`, and `binding_authority` before interpreting state.
+3. Propose the exact title and operation in chat.
+4. Wait for explicit operator approval.
+5. For topic operations, call `telegram_topic_manage` with approval metadata.
+
+`telegram_topic_manage(action=create_topic)` creates the Telegram topic and returns its `thread_id`; it does not bind or move the current Hermes session unless a separate approved operation explicitly reports that routing changed.
+
+`telegram_topic_manage(action=bind_session)` in supergroup/forum topics records lifecycle metadata only unless the tool reports `routing_effect` other than `metadata_only`.
 
 Approval metadata must include `approved_by` and `approval_text_excerpt`; include `approval_ref` when a message id or other reference is available.
 
@@ -53,6 +50,7 @@ Approval metadata must include `approved_by` and `approval_text_excerpt`; includ
 
 - Do not silently create or rename Telegram topics.
 - Do not claim Telegram operations succeeded unless the tool reports success.
-- Do not invent pinned-marker state.
+- Do not treat a metadata-only binding mismatch as active routing.
+- Do not recommend switching between private-DM topics and supergroup/forum topics unless the operator is explicitly discussing that change.
 - Do not expose broad Telegram group administration through this workflow.
-- Do not ask the operator to manually create or pin bootstrap markers when the approved tool path is available.
+- Do not create, pin, unpin, track, or promise Telegram pinned messages as lifecycle memory.
