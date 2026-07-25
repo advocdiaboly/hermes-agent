@@ -1717,6 +1717,30 @@ def test_plain_image_keeps_docker_init_and_run_noexec(monkeypatch):
     )
 
 
+def test_scratch_tmpfs_keeps_tmp_executable_and_var_tmp_noexec(monkeypatch):
+    """Docker scratch space permits executable /tmp but hardens /var/tmp."""
+    monkeypatch.setattr(docker_env, "find_docker", lambda: "/usr/bin/docker")
+    monkeypatch.setattr(docker_env, "_cgroup_limits_ok", True)
+    calls = _mock_subprocess_run_with_entrypoint(monkeypatch, '["/bin/sh","-c"]')
+
+    _make_dummy_env(image="python:3.11")
+
+    run_args = next(
+        command for command, _ in calls
+        if isinstance(command, list) and len(command) >= 2 and command[1] == "run"
+    )
+    tmpfs_mounts = [
+        run_args[index + 1]
+        for index, argument in enumerate(run_args[:-1])
+        if argument == "--tmpfs"
+    ]
+    tmp_mount = next(mount for mount in tmpfs_mounts if mount.startswith("/tmp:"))
+    var_tmp_mount = next(mount for mount in tmpfs_mounts if mount.startswith("/var/tmp:"))
+
+    assert "noexec" not in tmp_mount
+    assert "noexec" in var_tmp_mount
+
+
 # ---------------------------------------------------------------------------
 # Out-of-band container removal recovery (issue #36266, PR #36631)
 # ---------------------------------------------------------------------------

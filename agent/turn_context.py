@@ -24,7 +24,9 @@ move-and-name refactor with no semantic change.
 
 from __future__ import annotations
 
+import hashlib
 import logging
+import re
 import threading
 import uuid
 from dataclasses import dataclass
@@ -39,6 +41,54 @@ from agent.model_metadata import (
 )
 
 logger = logging.getLogger(__name__)
+
+TURN_ID_COMPONENT_MAX_CHARS = 256
+TURN_ID_NONCE_DIGEST_CHARS = 64
+TURN_ID_MAX_CHARS = (
+    (2 * TURN_ID_COMPONENT_MAX_CHARS)
+    + TURN_ID_NONCE_DIGEST_CHARS
+    + 2
+)
+_TURN_ID_SAFE_COMPONENT_RE = re.compile(r"[A-Za-z0-9._-]+")
+
+
+def _bounded_turn_id_component(value: Any, *, default: str) -> str:
+    """Return an ASCII component with a collision-resistant overflow suffix."""
+
+    text = str(value or default)
+    if (
+        len(text) <= TURN_ID_COMPONENT_MAX_CHARS
+        and _TURN_ID_SAFE_COMPONENT_RE.fullmatch(text)
+    ):
+        return text
+    digest = hashlib.sha256(
+        text.encode("utf-8", errors="replace")
+    ).hexdigest()
+    safe_prefix = re.sub(r"[^A-Za-z0-9._-]+", "_", text)
+    prefix_limit = TURN_ID_COMPONENT_MAX_CHARS - len(digest) - 1
+    return f"{safe_prefix[:prefix_limit]}~{digest}"
+
+
+def build_authoritative_turn_id(
+    session_id: Any,
+    task_id: Any,
+    *,
+    nonce: str,
+) -> str:
+    """Build the bounded internal turn identifier used by v0.19 lifecycle."""
+
+    session_component = _bounded_turn_id_component(
+        session_id,
+        default="session",
+    )
+    task_component = _bounded_turn_id_component(task_id, default="task")
+    nonce_component = hashlib.sha256(
+        str(nonce).encode("utf-8", errors="replace")
+    ).hexdigest()
+    turn_id = f"{session_component}:{task_component}:{nonce_component}"
+    if len(turn_id) > TURN_ID_MAX_CHARS:  # pragma: no cover - invariant guard
+        raise ValueError("authoritative turn id exceeds internal bound")
+    return turn_id
 
 
 def compose_user_api_content(
@@ -367,9 +417,32 @@ def build_turn_context(
     # Generate unique task_id if not provided to isolate VMs between tasks.
     effective_task_id = task_id or str(uuid.uuid4())
     agent._current_task_id = effective_task_id
-    turn_id = f"{agent.session_id or 'session'}:{effective_task_id}:{uuid.uuid4().hex[:8]}"
+    turn_id = build_authoritative_turn_id(
+        agent.session_id,
+        effective_task_id,
+        nonce=uuid.uuid4().hex,
+    )
     agent._current_turn_id = turn_id
     agent._current_api_request_id = ""
+    # Bind telemetry at the authoritative v0.19 turn boundary itself. Every
+    # operation below this point is allowed to fail while still producing one
+    # failed finish record from the run-conversation wrapper.
+    try:
+        from agent.tool_search_telemetry import start_turn as _start_tool_search_turn
+        _start_tool_search_turn(
+            turn_id=turn_id,
+            session_id=agent.session_id or "",
+            user_message=(
+                persist_user_message
+                if persist_user_message is not None
+                else user_message
+            ),
+            tools=agent.tools,
+            model=agent.model,
+            provider=agent.provider or "",
+        )
+    except Exception:
+        logger.debug("tool-search turn telemetry start failed", exc_info=True)
     # Tripwire: warn (with both turn ids) when this turn starts before the
     # previous turn's turn-end persist — concurrent turns on one session
     # interleave transcript writes. Cleared in _persist_session.

@@ -118,6 +118,11 @@ def _record_codex_app_server_usage(agent, turn) -> dict[str, Any]:
         "cache_write_tokens": canonical_usage.cache_write_tokens,
         "reasoning_tokens": canonical_usage.reasoning_tokens,
     }
+    try:
+        from agent.tool_search_telemetry import note_api_usage
+        note_api_usage(**usage_dict)
+    except Exception:
+        logger.debug("codex turn response-usage telemetry skipped", exc_info=True)
 
     compressor = getattr(agent, "context_compressor", None)
     if compressor is not None:
@@ -692,6 +697,11 @@ def run_codex_app_server_turn(
     # return reaches us. Do NOT append again — that would duplicate.
 
     try:
+        try:
+            from agent.tool_search_telemetry import note_api_call
+            note_api_call()
+        except Exception:
+            logger.debug("codex turn API-call telemetry skipped", exc_info=True)
         turn = agent._codex_session.run_turn(user_input=user_message)
     except Exception as exc:
         logger.exception("codex app-server turn failed")
@@ -711,6 +721,9 @@ def run_codex_app_server_turn(
             "api_calls": 0,
             "completed": False,
             "partial": True,
+            "failed": True,
+            "interrupted": False,
+            "turn_exit_reason": "codex_app_server_error",
             "error": str(exc),
         }
 
@@ -813,12 +826,23 @@ def run_codex_app_server_turn(
         except Exception:
             logger.debug("background review spawn raised", exc_info=True)
 
+    interrupted = bool(turn.interrupted)
+    failed = turn.error is not None and not interrupted
     return {
         "final_response": turn.final_text,
         "messages": messages,
         "api_calls": api_calls,
-        "completed": not turn.interrupted and turn.error is None,
-        "partial": turn.interrupted or turn.error is not None,
+        "completed": not interrupted and not failed,
+        "partial": interrupted or failed,
+        "interrupted": interrupted,
+        "failed": failed,
+        "turn_exit_reason": (
+            "interrupted"
+            if interrupted
+            else "codex_app_server_error"
+            if failed
+            else "completed"
+        ),
         "error": turn.error,
         # The codex app-server runtime IS an early-return path that bypasses
         # conversation_loop, but we flush the projected assistant/tool messages
@@ -1215,6 +1239,14 @@ def run_codex_stream(agent, api_kwargs: dict, client: Any = None, on_first_delta
         stream_kwargs["stream"] = True
 
         try:
+            try:
+                from agent.tool_search_telemetry import note_api_call
+                note_api_call()
+            except Exception:
+                logger.debug(
+                    "codex provider-attempt telemetry skipped",
+                    exc_info=True,
+                )
             event_stream = active_client.responses.create(**stream_kwargs)
         except (_httpx.RemoteProtocolError, _httpx.ReadTimeout, _httpx.ConnectError, ConnectionError) as exc:
             if attempt < max_stream_retries:

@@ -155,6 +155,26 @@ class TestBlockingGatewayApproval:
         assert not e2.event.is_set()
         assert len(_gateway_queues[session_key]) == 1
 
+    @pytest.mark.parametrize("requested_choice", ["session", "always"])
+    def test_one_operation_entry_normalizes_broader_choice(self, requested_choice):
+        from tools.approval import (
+            _ApprovalEntry,
+            _gateway_queues,
+            resolve_gateway_approval,
+        )
+
+        entry = _ApprovalEntry(
+            {
+                "command": "Rename current Telegram topic",
+                "allow_permanent": False,
+                "allow_session": False,
+            }
+        )
+        _gateway_queues["one-operation"] = [entry]
+
+        assert resolve_gateway_approval("one-operation", requested_choice) == 1
+        assert entry.result == "once"
+
     def test_unregister_signals_all_entries(self):
         """unregister_gateway_notify signals all waiting entries to prevent hangs."""
         from tools.approval import (
@@ -252,6 +272,33 @@ class TestApproveCommand:
         assert "session" in result.lower()
         assert e1.result == "session"
         assert e2.result == "session"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("requested_scope", ["session", "always"])
+    async def test_one_operation_approve_reports_once(
+        self, requested_scope,
+    ):
+        from tools.approval import _ApprovalEntry, _gateway_queues
+
+        runner = _make_runner()
+        source = _make_source()
+        session_key = runner._session_key_for_source(source)
+        entry = _ApprovalEntry(
+            {
+                "command": "Rename current Telegram topic",
+                "allow_permanent": False,
+                "allow_session": False,
+            }
+        )
+        _gateway_queues[session_key] = [entry]
+
+        result = await runner._handle_approve_command(
+            _make_event(f"/approve {requested_scope}")
+        )
+
+        assert entry.result == "once"
+        assert "session" not in result.lower()
+        assert "permanent" not in result.lower()
 
     @pytest.mark.asyncio
     async def test_approve_no_pending(self):

@@ -800,6 +800,7 @@ class TelegramAdapter(BasePlatformAdapter):
         self._choice_picker_state: Dict[str, dict] = {}
         # Approval button state: message_id → session_key
         self._approval_state: Dict[int, str] = {}
+        self._approval_scopes: Dict[int, Dict[str, bool]] = {}
         # Slash-confirm button state: confirm_id → session_key (for /reload-mcp
         # and any other slash-confirm prompts; see GatewayRunner._request_slash_confirm).
         self._slash_confirm_state: Dict[str, str] = {}
@@ -5004,6 +5005,7 @@ class TelegramAdapter(BasePlatformAdapter):
         description: str = "dangerous command",
         metadata: Optional[Dict[str, Any]] = None,
         allow_permanent: bool = True,
+        allow_session: bool = True,
         smart_denied: bool = False,
     ) -> SendResult:
         """Send an inline-keyboard approval prompt with interactive buttons.
@@ -5038,7 +5040,7 @@ class TelegramAdapter(BasePlatformAdapter):
             buttons = [
                 InlineKeyboardButton("✅ Allow Once", callback_data=f"ea:once:{approval_id}")
             ]
-            if not smart_denied:
+            if not smart_denied and allow_session:
                 buttons.append(
                     InlineKeyboardButton("✅ Session", callback_data=f"ea:session:{approval_id}")
                 )
@@ -5072,6 +5074,10 @@ class TelegramAdapter(BasePlatformAdapter):
 
             # Store session_key keyed by approval_id for the callback handler
             self._approval_state[approval_id] = session_key
+            self._approval_scopes[approval_id] = {
+                "allow_session": allow_session,
+                "allow_permanent": allow_permanent,
+            }
 
             return SendResult(success=True, message_id=str(msg.message_id))
         except Exception as e:
@@ -5942,9 +5948,31 @@ class TelegramAdapter(BasePlatformAdapter):
                     return
 
                 session_key = self._approval_state.pop(approval_id, None)
+                approval_scope = self._approval_scopes.pop(approval_id, {})
                 if not session_key:
                     await query.answer(text="This approval has already been resolved.")
                     return
+
+                if (
+                    not approval_scope.get("allow_session", True)
+                    and choice in {"session", "always"}
+                ):
+                    choice = "once"
+                elif (
+                    not approval_scope.get("allow_permanent", True)
+                    and choice == "always"
+                ):
+                    choice = "session"
+                try:
+                    from tools.approval import normalize_gateway_approval_choice
+
+                    choice = normalize_gateway_approval_choice(session_key, choice)
+                except Exception:
+                    logger.warning(
+                        "Failed to normalize Telegram approval scope; denying",
+                        exc_info=True,
+                    )
+                    choice = "deny"
 
                 # Map choice to human-readable label
                 label_map = {

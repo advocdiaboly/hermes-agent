@@ -4659,7 +4659,9 @@ class GatewaySlashCommandsMixin:
         session_key = self._session_key_for_source(source)
 
         from tools.approval import (
-            resolve_gateway_approval, has_blocking_approval,
+            has_blocking_approval,
+            normalize_gateway_approval_choice,
+            resolve_gateway_approval,
         )
 
         if not has_blocking_approval(session_key):
@@ -4680,6 +4682,11 @@ class GatewaySlashCommandsMixin:
         else:
             choice = "once"
 
+        choice = normalize_gateway_approval_choice(
+            session_key,
+            choice,
+            resolve_all=resolve_all,
+        )
         count = resolve_gateway_approval(session_key, choice, resolve_all=resolve_all)
         if not count:
             return t("gateway.approve.no_pending")

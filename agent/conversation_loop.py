@@ -1472,6 +1472,35 @@ def run_conversation(
                 )
                 
                 api_duration = time.time() - api_start_time
+
+                # Record provider usage before any finish-reason branch can
+                # return a partial/error result. MoA advisors report their own
+                # calls; this is only the acting aggregator response.
+                try:
+                    _raw_usage = getattr(response, "usage", None)
+                    if _raw_usage:
+                        _provider_usage = normalize_usage(
+                            _raw_usage,
+                            provider=agent.provider,
+                            api_mode=agent.api_mode,
+                        )
+                        from agent.tool_search_telemetry import note_api_usage
+                        note_api_usage(
+                            prompt_tokens=_provider_usage.prompt_tokens,
+                            input_tokens=_provider_usage.input_tokens,
+                            output_tokens=_provider_usage.output_tokens,
+                            completion_tokens=_provider_usage.output_tokens,
+                            total_tokens=_provider_usage.total_tokens,
+                            cache_read_tokens=_provider_usage.cache_read_tokens,
+                            cache_write_tokens=_provider_usage.cache_write_tokens,
+                            reasoning_tokens=_provider_usage.reasoning_tokens,
+                            turn_id=turn_id,
+                        )
+                except Exception:
+                    logger.debug(
+                        "tool-search response-usage telemetry skipped",
+                        exc_info=True,
+                    )
                 
                 # Stop thinking spinner silently -- the response box or tool
                 # execution messages that follow are more informative.
@@ -5799,6 +5828,84 @@ def run_conversation(
         _pending_verification_response_previewed=_pending_verification_response_previewed,
     )
 
+
+
+_run_conversation_impl = run_conversation
+
+
+def _run_conversation_with_telemetry(
+    agent,
+    user_message: Any,
+    system_message: str = None,
+    conversation_history: List[Dict[str, Any]] = None,
+    task_id: str = None,
+    stream_callback: Optional[callable] = None,
+    persist_user_message: Optional[Any] = None,
+    persist_user_timestamp: Optional[float] = None,
+    moa_config: Optional[dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Run one authoritative turn and finalize telemetry on every exit path."""
+
+    try:
+        from agent.tool_search_telemetry import (
+            begin_turn_scope,
+            end_turn_scope,
+            finish_current_turn,
+        )
+        scope_token = begin_turn_scope()
+    except Exception:
+        logger.debug(
+            "tool-search telemetry setup failed; running uninstrumented",
+            exc_info=True,
+        )
+        return _run_conversation_impl(
+            agent,
+            user_message,
+            system_message=system_message,
+            conversation_history=conversation_history,
+            task_id=task_id,
+            stream_callback=stream_callback,
+            persist_user_message=persist_user_message,
+            persist_user_timestamp=persist_user_timestamp,
+            moa_config=moa_config,
+        )
+
+    def _finish_telemetry_safely(*args, **kwargs):
+        try:
+            return finish_current_turn(*args, **kwargs)
+        except Exception:
+            logger.debug(
+                "tool-search telemetry finalization failed",
+                exc_info=True,
+            )
+            return False
+
+    try:
+        result = _run_conversation_impl(
+            agent,
+            user_message,
+            system_message=system_message,
+            conversation_history=conversation_history,
+            task_id=task_id,
+            stream_callback=stream_callback,
+            persist_user_message=persist_user_message,
+            persist_user_timestamp=persist_user_timestamp,
+            moa_config=moa_config,
+        )
+    except BaseException as exc:
+        _finish_telemetry_safely(exception=exc)
+        raise
+    else:
+        _finish_telemetry_safely(result)
+        return result
+    finally:
+        end_turn_scope(scope_token)
+
+
+import functools as _functools
+run_conversation = _functools.wraps(_run_conversation_impl)(
+    _run_conversation_with_telemetry
+)
 
 
 __all__ = ["run_conversation"]

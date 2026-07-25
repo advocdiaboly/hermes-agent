@@ -326,6 +326,12 @@ TOOLSETS = {
         "includes": []
     },
 
+    "telegram_topic_lifecycle": {
+        "description": "Inspect and manage the authoritative current Telegram topic",
+        "tools": ["telegram_topic_manage", "telegram_topic_status"],
+        "includes": [],
+    },
+
 
     # Scenario-specific toolsets
     
@@ -449,7 +455,7 @@ TOOLSETS = {
     "hermes-telegram": {
         "description": "Telegram bot toolset - full access for personal use (terminal has safety checks)",
         "tools": _HERMES_CORE_TOOLS,
-        "includes": []
+        "includes": ["telegram_topic_lifecycle"]
     },
     
     "hermes-discord": {

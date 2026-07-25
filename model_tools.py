@@ -332,7 +332,8 @@ def get_tool_definitions(
             _last_resolved_tool_names = [t["function"]["name"] for t in cached]
             # Return a shallow copy of the list but share the dict references —
             # schemas are treated as read-only by all known callers.
-            return list(cached)
+            from agent.tool_search_telemetry import copy_tool_definitions
+            return copy_tool_definitions(cached)
 
     result = _compute_tool_definitions(enabled_toolsets, disabled_toolsets, quiet_mode,
                                        skip_tool_search_assembly=skip_tool_search_assembly)
@@ -350,7 +351,8 @@ def get_tool_definitions(
         if len(_tool_defs_cache) >= _TOOL_DEFS_CACHE_MAX:
             _tool_defs_cache.pop(next(iter(_tool_defs_cache)))  # evict oldest
         _tool_defs_cache[cache_key] = result
-        return list(result)
+        from agent.tool_search_telemetry import copy_tool_definitions
+        return copy_tool_definitions(result)
     return result
 
 
@@ -547,7 +549,7 @@ def _compute_tool_definitions(
     try:
         from tools.tool_search import assemble_tool_defs, load_config as _load_ts_config
         ts_cfg = _load_ts_config()
-        if not skip_tool_search_assembly and ts_cfg.enabled != "off":
+        if not skip_tool_search_assembly:
             context_length = _resolve_active_context_length()
             assembly = assemble_tool_defs(
                 filtered_tools,
@@ -561,6 +563,52 @@ def _compute_tool_definitions(
                     f"Threshold ~{assembly.threshold_tokens} tokens."
                 )
             filtered_tools = assembly.tool_defs
+
+            # Carry immutable assembly metadata on this exact schema snapshot.
+            # The marker is an attribute on dict/list subclasses, not a JSON
+            # key, so providers see byte-for-byte ordinary tool definitions.
+            # Element-level markers survive callers that make ``list(...)``
+            # copies (notably between-turn MCP refresh) without relying on a
+            # process-global "last assembly" value.
+            from agent.tool_search_telemetry import (
+                ToolSearchAssemblySnapshot,
+                attach_assembly_snapshot,
+            )
+
+            threshold_tokens = assembly.threshold_tokens
+            if ts_cfg.enabled == "auto":
+                # Compute from configuration even when there are no deferrable
+                # tools: AssemblyResult returns its default zero on that fast
+                # path, but the control arm still has a real gate threshold.
+                # Unknown model context uses should_activate's documented
+                # fixed fallback.
+                threshold_tokens = (
+                    int(context_length * (ts_cfg.threshold_pct / 100.0))
+                    if context_length > 0
+                    else 20_000
+                )
+            elif ts_cfg.enabled == "on":
+                threshold_tokens = 1
+
+            if ts_cfg.enabled == "off":
+                snapshot = ToolSearchAssemblySnapshot.off(
+                    deferred_count=assembly.deferred_count,
+                    deferred_schema_tokens=assembly.deferred_tokens,
+                    activation_threshold_tokens=0,
+                )
+            elif assembly.activated:
+                snapshot = ToolSearchAssemblySnapshot.active(
+                    deferred_count=assembly.deferred_count,
+                    deferred_schema_tokens=assembly.deferred_tokens,
+                    activation_threshold_tokens=threshold_tokens,
+                )
+            else:
+                snapshot = ToolSearchAssemblySnapshot.control(
+                    deferred_count=assembly.deferred_count,
+                    deferred_schema_tokens=assembly.deferred_tokens,
+                    activation_threshold_tokens=threshold_tokens,
+                )
+            filtered_tools = attach_assembly_snapshot(filtered_tools, snapshot)
     except Exception as e:  # pragma: no cover — never break tool loading
         logger.warning("Tool search assembly skipped: %s", e)
 
@@ -1080,6 +1128,12 @@ def handle_function_call(
         _ts_mod = None
 
     if _ts_mod is not None and _ts_mod.is_bridge_tool(function_name):
+        try:
+            from agent.tool_search_telemetry import note_bridge_call
+            note_bridge_call(function_name, turn_id=turn_id)
+        except Exception:
+            # Observability must never alter bridge behavior.
+            logger.debug("tool-search bridge telemetry skipped", exc_info=True)
         try:
             # Use skip_tool_search_assembly=True so we see the real catalog,
             # not the already-collapsed bridge-only list (the bridge would

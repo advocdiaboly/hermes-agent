@@ -23,6 +23,7 @@ import re
 import threading
 import time
 import uuid
+from contextlib import contextmanager
 from types import SimpleNamespace
 from typing import Any, Dict, Optional
 
@@ -55,6 +56,58 @@ _OPENROUTER_PROVIDER_SORT_VALUES = {"throughput", "latency", "price"}
 # billing reasons keep their own 60s cooldown (set above); this is the
 # narrower non-rate-limit case.  See issue #24996.
 _FALLBACK_EXHAUSTED_COOLDOWN_S = 5.0
+
+
+def _note_provider_attempt(agent) -> None:
+    """Best-effort count at the terminal SDK provider-attempt seam."""
+
+    if getattr(agent, "provider", None) == "moa":
+        # The MoA client is an in-process virtual facade. Its reference and
+        # aggregator SDK calls are counted inside auxiliary_client.call_llm().
+        return
+    try:
+        from agent.tool_search_telemetry import note_api_call
+        note_api_call()
+    except Exception:
+        logger.debug("provider-attempt telemetry skipped", exc_info=True)
+
+
+def _capture_telemetry_turn_id() -> Optional[str]:
+    """Capture the invocation-local tracker ID before scheduling provider work."""
+
+    try:
+        from agent.tool_search_telemetry import current_turn_id
+        return current_turn_id()
+    except Exception:
+        logger.debug("provider telemetry turn capture skipped", exc_info=True)
+        return None
+
+
+@contextmanager
+def _bound_telemetry_turn(turn_id: Optional[str]):
+    """Bind an immutable invocation tracker in a provider worker."""
+
+    scope_token = None
+    end_turn_scope = None
+    if turn_id:
+        try:
+            from agent.tool_search_telemetry import bind_turn_scope, end_turn_scope
+            scope_token = bind_turn_scope(turn_id)
+        except Exception:
+            logger.debug("provider telemetry worker binding skipped", exc_info=True)
+    try:
+        yield
+    finally:
+        if scope_token is not None and end_turn_scope is not None:
+            end_turn_scope(scope_token)
+
+
+def _call_moa_facade(agent, create, api_kwargs):
+    """Run the virtual MoA facade with its authoritative tracker bound."""
+
+    turn_id = _capture_telemetry_turn_id()
+    with _bound_telemetry_turn(turn_id):
+        return create(**api_kwargs)
 
 
 def _ra():
@@ -369,7 +422,13 @@ def _bedrock_reasoning_stale_floor(model_id: object) -> "float | None":
     return None
 
 
-def _dispatch_nonstreaming_api_request(agent, api_kwargs: dict, *, make_client):
+def _dispatch_nonstreaming_api_request(
+    agent,
+    api_kwargs: dict,
+    *,
+    make_client,
+    telemetry_turn_id: Optional[str] = None,
+):
     """Run one non-streaming LLM request for the active api_mode and return it.
 
     Shared by the interrupt-worker path (``interruptible_api_call``) and the
@@ -385,6 +444,22 @@ def _dispatch_nonstreaming_api_request(agent, api_kwargs: dict, *, make_client):
     interrupt, abort, cancellation, and close semantics stay in the callers —
     this helper only issues the request.
     """
+    with _bound_telemetry_turn(telemetry_turn_id):
+        return _dispatch_nonstreaming_api_request_bound(
+            agent,
+            api_kwargs,
+            make_client=make_client,
+        )
+
+
+def _dispatch_nonstreaming_api_request_bound(
+    agent,
+    api_kwargs: dict,
+    *,
+    make_client,
+):
+    """Dispatch with the invocation's telemetry tracker already bound."""
+
     if agent.api_mode == "codex_responses":
         request_client = make_client("codex_stream_request")
         return agent._run_codex_stream(
@@ -399,6 +474,7 @@ def _dispatch_nonstreaming_api_request(agent, api_kwargs: dict, *, make_client):
         request_client = make_client(
             "anthropic_messages_request", kind="anthropic_messages"
         )
+        _note_provider_attempt(agent)
         return agent._anthropic_messages_create(api_kwargs, client=request_client)
     if agent.api_mode == "bedrock_converse":
         # Bedrock uses boto3 directly — no OpenAI client needed.
@@ -415,6 +491,7 @@ def _dispatch_nonstreaming_api_request(agent, api_kwargs: dict, *, make_client):
         api_kwargs.pop("__bedrock_converse__", None)
         client = _get_bedrock_runtime_client(region)
         try:
+            _note_provider_attempt(agent)
             raw_response = client.converse(**api_kwargs)
         except Exception as _bedrock_exc:
             # Evict the cached client on stale-connection failures
@@ -427,8 +504,13 @@ def _dispatch_nonstreaming_api_request(agent, api_kwargs: dict, *, make_client):
         # MoA is a virtual chat-completions provider backed by the
         # in-process MoAClient facade. Do not rebuild a request-local
         # OpenAI client from the virtual runtime metadata.
-        return agent.client.chat.completions.create(**api_kwargs)
+        return _call_moa_facade(
+            agent,
+            agent.client.chat.completions.create,
+            api_kwargs,
+        )
     request_client = make_client("chat_completion_request")
+    _note_provider_attempt(agent)
     return request_client.chat.completions.create(**api_kwargs)
 
 
@@ -457,6 +539,7 @@ def direct_api_call(agent, api_kwargs: dict):
     timeout (provider ``request_timeout_seconds`` / ``HERMES_API_TIMEOUT``) bounds
     a genuinely hung provider — the same bound interactive calls already rely on.
     """
+    telemetry_turn_id = _capture_telemetry_turn_id()
     _check_stale_giveup(agent)
     agent._touch_activity("waiting for non-streaming API response")
     request_client_holder = {"client": None}
@@ -482,7 +565,10 @@ def direct_api_call(agent, api_kwargs: dict):
 
     try:
         response = _dispatch_nonstreaming_api_request(
-            agent, api_kwargs, make_client=_make_client
+            agent,
+            api_kwargs,
+            make_client=_make_client,
+            telemetry_turn_id=telemetry_turn_id,
         )
     except Exception:
         if getattr(agent, "_interrupt_requested", False):
@@ -523,6 +609,7 @@ def interruptible_api_call(agent, api_kwargs: dict):
     if should_use_direct_api_call(agent):
         return direct_api_call(agent, api_kwargs)
 
+    telemetry_turn_id = _capture_telemetry_turn_id()
     result = {"response": None, "error": None}
 
     # Cross-turn stale-call circuit breaker (#58962) — non-streaming sibling
@@ -613,6 +700,7 @@ def interruptible_api_call(agent, api_kwargs: dict):
                     ),
                     kind=kind,
                 ),
+                telemetry_turn_id=telemetry_turn_id,
             )
         except Exception as e:
             # If the request was cancelled by the main thread's interrupt
@@ -2083,11 +2171,18 @@ def handle_max_iterations(agent, messages: list, api_call_count: int) -> str:
                                max_tokens=agent.max_tokens, reasoning_config=agent.reasoning_config,
                                is_oauth=agent._is_anthropic_oauth,
                                preserve_dots=agent._anthropic_preserve_dots())
+                _note_provider_attempt(agent)
                 summary_response = agent._anthropic_messages_create(_ant_kw)
                 _summary_result = _tsum.normalize_response(summary_response, strip_tool_prefix=agent._is_anthropic_oauth)
                 final_response = (_summary_result.content or "").strip()
             else:
-                summary_response = agent._ensure_primary_openai_client(reason="iteration_limit_summary").chat.completions.create(**summary_kwargs)
+                summary_client = agent._ensure_primary_openai_client(
+                    reason="iteration_limit_summary"
+                )
+                _note_provider_attempt(agent)
+                summary_response = summary_client.chat.completions.create(
+                    **summary_kwargs
+                )
                 _summary_result = agent._get_transport().normalize_response(summary_response)
                 final_response = (_summary_result.content or "").strip()
 
@@ -2113,6 +2208,7 @@ def handle_max_iterations(agent, messages: list, api_call_count: int) -> str:
                                 is_oauth=agent._is_anthropic_oauth,
                                 max_tokens=agent.max_tokens, reasoning_config=agent.reasoning_config,
                                 preserve_dots=agent._anthropic_preserve_dots())
+                _note_provider_attempt(agent)
                 retry_response = agent._anthropic_messages_create(_ant_kw2)
                 _retry_result = _tretry.normalize_response(retry_response, strip_tool_prefix=agent._is_anthropic_oauth)
                 final_response = (_retry_result.content or "").strip()
@@ -2130,7 +2226,13 @@ def handle_max_iterations(agent, messages: list, api_call_count: int) -> str:
                 if summary_extra_body:
                     summary_kwargs["extra_body"] = summary_extra_body
 
-                summary_response = agent._ensure_primary_openai_client(reason="iteration_limit_summary_retry").chat.completions.create(**summary_kwargs)
+                summary_client = agent._ensure_primary_openai_client(
+                    reason="iteration_limit_summary_retry"
+                )
+                _note_provider_attempt(agent)
+                summary_response = summary_client.chat.completions.create(
+                    **summary_kwargs
+                )
                 _retry_result = agent._get_transport().normalize_response(summary_response)
                 final_response = (_retry_result.content or "").strip()
 
@@ -2251,6 +2353,8 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
     if agent._interrupt_requested:
         raise InterruptedError("Agent interrupted before streaming API call")
 
+    telemetry_turn_id = _capture_telemetry_turn_id()
+
     # Cron and other non-interactive, nested-pool contexts deadlock on the
     # spawned worker thread (#62151). They also have no stream consumer, so the
     # deltas this path produces go nowhere. Delegate to the non-streaming entry
@@ -2318,6 +2422,7 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
                 api_kwargs.pop("__bedrock_converse__", None)
                 client = _get_bedrock_runtime_client(region)
                 try:
+                    _note_provider_attempt(agent)
                     raw_response = client.converse_stream(**api_kwargs)
                 except Exception as _bedrock_exc:
                     # IAM policies scoped to bedrock:InvokeModel only (no
@@ -2339,6 +2444,7 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
                             "using non-streaming converse() for this session.",
                             type(_bedrock_exc).__name__,
                         )
+                        _note_provider_attempt(agent)
                         result["response"] = normalize_converse_response(
                             client.converse(**api_kwargs)
                         )
@@ -2377,7 +2483,11 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
             except Exception as e:
                 result["error"] = e
 
-        t = threading.Thread(target=_bedrock_call, daemon=True)
+        def _bedrock_call_with_telemetry():
+            with _bound_telemetry_turn(telemetry_turn_id):
+                _bedrock_call()
+
+        t = threading.Thread(target=_bedrock_call_with_telemetry, daemon=True)
         t.start()
         while t.is_alive():
             t.join(timeout=0.3)
@@ -2679,7 +2789,15 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
         # ``request_client_holder["diag"]`` for closure access.
         _diag = agent._stream_diag_init()
         request_client_holder["diag"] = _diag
-        stream = request_client.chat.completions.create(**stream_kwargs)
+        _note_provider_attempt(agent)
+        if agent.provider == "moa":
+            stream = _call_moa_facade(
+                agent,
+                request_client.chat.completions.create,
+                stream_kwargs,
+            )
+        else:
+            stream = request_client.chat.completions.create(**stream_kwargs)
         # Claim the delta sink for THIS attempt (#65991). If a prior attempt's
         # stream is somehow still alive (a stale-stream reconnect whose socket
         # abort raced), this claim supersedes it so its late chunks are fenced
@@ -3102,6 +3220,7 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
             api_kwargs, log_prefix=getattr(agent, "log_prefix", "")
         )
         # Use the Anthropic SDK's streaming context manager
+        _note_provider_attempt(agent)
         with request_client.messages.stream(**api_kwargs) as stream:
             # The Anthropic SDK exposes the raw httpx response on
             # ``stream.response``.  Snapshot diagnostic headers
@@ -3612,7 +3731,11 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
         if _reasoning_floor is not None:
             _stream_stale_timeout = max(_stream_stale_timeout, _reasoning_floor)
 
-    t = threading.Thread(target=_call, daemon=True)
+    def _call_with_telemetry():
+        with _bound_telemetry_turn(telemetry_turn_id):
+            _call()
+
+    t = threading.Thread(target=_call_with_telemetry, daemon=True)
     t.start()
     _last_heartbeat = time.time()
     _HEARTBEAT_INTERVAL = 30.0  # seconds between gateway activity touches

@@ -333,6 +333,20 @@ def _run_reference(
                 )
             except Exception:  # pragma: no cover - defensive
                 usage = CanonicalUsage()
+        try:
+            from agent.tool_search_telemetry import note_api_usage
+            note_api_usage(
+                prompt_tokens=usage.prompt_tokens,
+                input_tokens=usage.input_tokens,
+                output_tokens=usage.output_tokens,
+                completion_tokens=usage.output_tokens,
+                total_tokens=usage.total_tokens,
+                cache_read_tokens=usage.cache_read_tokens,
+                cache_write_tokens=usage.cache_write_tokens,
+                reasoning_tokens=usage.reasoning_tokens,
+            )
+        except Exception:
+            logger.debug("MoA reference usage telemetry skipped", exc_info=True)
         # Price this advisor at ITS OWN model/provider rate (with correct
         # cache-read/cache-write split), not the aggregator's. This is why
         # advisor cost is summed as dollars rather than by folding tokens into
@@ -733,6 +747,28 @@ def aggregate_moa_context(
             reasoning_config=_aggregator_reasoning_config(aggregator),
             **agg_runtime,
         )
+        try:
+            from agent.usage_pricing import normalize_usage
+            from agent.tool_search_telemetry import note_api_usage
+            raw_usage = getattr(response, "usage", None)
+            if raw_usage:
+                usage = normalize_usage(
+                    raw_usage,
+                    provider=agg_runtime.get("provider"),
+                    api_mode=agg_runtime.get("api_mode"),
+                )
+                note_api_usage(
+                    prompt_tokens=usage.prompt_tokens,
+                    input_tokens=usage.input_tokens,
+                    output_tokens=usage.output_tokens,
+                    completion_tokens=usage.output_tokens,
+                    total_tokens=usage.total_tokens,
+                    cache_read_tokens=usage.cache_read_tokens,
+                    cache_write_tokens=usage.cache_write_tokens,
+                    reasoning_tokens=usage.reasoning_tokens,
+                )
+        except Exception:
+            logger.debug("MoA aggregator usage telemetry skipped", exc_info=True)
         synthesis = _extract_text(response)
     except Exception as exc:
         logger.warning("MoA aggregator model %s failed: %s", agg_label, exc)

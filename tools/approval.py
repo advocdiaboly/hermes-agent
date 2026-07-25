@@ -2098,12 +2098,45 @@ def resolve_gateway_approval(session_key: str, choice: str,
         if not queue:
             _gateway_queues.pop(session_key, None)
 
+    normalized_choice = _normalize_gateway_choice_for_entries(choice, targets)
     for entry in targets:
-        entry.result = choice
+        entry.result = normalized_choice
         if reason:
             entry.reason = reason
         entry.event.set()
     return len(targets)
+
+
+def _normalize_gateway_choice_for_entries(choice: str, entries: list) -> str:
+    """Narrow a requested scope to capabilities shared by all target entries."""
+    normalized = choice if choice in {"once", "session", "always", "deny"} else "deny"
+    allow_session = all(
+        entry.data.get("allow_session", not entry.data.get("smart_denied", False))
+        for entry in entries
+    )
+    allow_permanent = all(
+        entry.data.get("allow_permanent", True) for entry in entries
+    )
+    if normalized == "always" and not allow_permanent:
+        normalized = "session" if allow_session else "once"
+    if normalized == "session" and not allow_session:
+        normalized = "once"
+    return normalized
+
+
+def normalize_gateway_approval_choice(
+    session_key: str,
+    choice: str,
+    *,
+    resolve_all: bool = False,
+) -> str:
+    """Return the truthful effective scope for a pending gateway approval."""
+    with _lock:
+        queue = _gateway_queues.get(session_key) or []
+        targets = list(queue) if resolve_all else list(queue[:1])
+    if not targets:
+        return choice if choice in {"once", "session", "always", "deny"} else "deny"
+    return _normalize_gateway_choice_for_entries(choice, targets)
 
 
 def has_blocking_approval(session_key: str) -> bool:
@@ -2273,6 +2306,7 @@ def save_permanent_allowlist(patterns: set):
 def prompt_dangerous_approval(command: str, description: str,
                               timeout_seconds: int | None = None,
                               allow_permanent: bool = True,
+                              allow_session: bool = True,
                               approval_callback=None,
                               *, smart_denied: bool = False) -> str:
     """Prompt the user to approve a dangerous command (CLI only).
@@ -2281,6 +2315,7 @@ def prompt_dangerous_approval(command: str, description: str,
         allow_permanent: When False, hide the [a]lways option (used when
             tirith warnings are present, since broad permanent allowlisting
             is inappropriate for content-level security findings).
+        allow_session: When False, offer only one-operation approval or denial.
         smart_denied: When True, this is an owner override of a Smart DENY.
             Offer only one-operation approval or denial.
         approval_callback: Optional callback registered by the CLI for
@@ -2305,11 +2340,16 @@ def prompt_dangerous_approval(command: str, description: str,
     if approval_callback is not None:
         try:
             callback_kwargs = {"allow_permanent": allow_permanent}
+            if not allow_session:
+                callback_kwargs["allow_session"] = False
             if smart_denied:
                 callback_kwargs["smart_denied"] = True
-            return approval_callback(
+            choice = approval_callback(
                 display_command, display_description, **callback_kwargs
             )
+            if (smart_denied or not allow_session) and choice != "once":
+                return "deny"
+            return choice
         except Exception as e:
             logger.error("Approval callback failed: %s", e, exc_info=True)
             return "deny"
@@ -2351,7 +2391,8 @@ def prompt_dangerous_approval(command: str, description: str,
             print(f"  {t('approval.dangerous_header', description=display_description)}")
             print(f"      {display_command}")
             print()
-            if smart_denied:
+            one_operation_only = smart_denied or not allow_session
+            if one_operation_only:
                 print(t("approval.choose_smart_deny"))
             elif allow_permanent:
                 print(t("approval.choose_long"))
@@ -2364,7 +2405,7 @@ def prompt_dangerous_approval(command: str, description: str,
 
             def get_input():
                 try:
-                    if smart_denied:
+                    if one_operation_only:
                         prompt = t("approval.prompt_smart_deny")
                     else:
                         prompt = t("approval.prompt_long") if allow_permanent else t("approval.prompt_short")
@@ -2381,7 +2422,7 @@ def prompt_dangerous_approval(command: str, description: str,
                 return "deny"
 
             choice = result["choice"]
-            if smart_denied:
+            if one_operation_only:
                 choice_map = {
                     **{
                         value: "once"
@@ -3884,6 +3925,8 @@ def request_elicitation_consent(
             "description": description,
             "pattern_key": "mcp_elicitation",
             "pattern_keys": ["mcp_elicitation"],
+            "allow_permanent": False,
+            "allow_session": False,
         }
         try:
             decision = _await_gateway_decision(
@@ -3900,7 +3943,7 @@ def request_elicitation_consent(
         if not decision.get("resolved"):
             return "cancel"
         choice = decision.get("choice")
-        if choice in ("once", "session", "always"):
+        if choice == "once":
             return "accept"
         return "decline"
 
@@ -3912,6 +3955,7 @@ def request_elicitation_consent(
             description,
             timeout_seconds=timeout_seconds,
             allow_permanent=False,
+            allow_session=False,
         )
     except Exception as exc:
         logger.error(
@@ -3919,7 +3963,7 @@ def request_elicitation_consent(
         )
         return "decline"
 
-    if choice in ("once", "session", "always"):
+    if choice == "once":
         return "accept"
     return "decline"
 

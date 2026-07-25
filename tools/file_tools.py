@@ -943,6 +943,7 @@ def _get_file_ops(task_id: str = "default") -> ShellFileOperations:
     from tools.terminal_tool import (
         _active_environments, _env_lock, _create_environment,
         _get_env_config, _last_activity, _start_cleanup_thread,
+        _build_container_config,
         _creation_locks,
         _creation_locks_lock,
         _resolve_container_task_id,
@@ -1043,17 +1044,7 @@ def _get_file_ops(task_id: str = "default") -> ShellFileOperations:
 
             container_config = None
             if env_type in {"docker", "singularity", "modal", "daytona"}:
-                container_config = {
-                    "container_cpu": config.get("container_cpu", 1),
-                    "container_memory": config.get("container_memory", 5120),
-                    "container_disk": config.get("container_disk", 51200),
-                    "container_persistent": config.get("container_persistent", True),
-                    "docker_volumes": config.get("docker_volumes", []),
-                    "docker_mount_cwd_to_workspace": config.get("docker_mount_cwd_to_workspace", False),
-                    "docker_forward_env": config.get("docker_forward_env", []),
-                    "docker_run_as_host_user": config.get("docker_run_as_host_user", False),
-                    "docker_network": config.get("docker_network", True),
-                }
+                container_config = _build_container_config(config)
 
             ssh_config = None
             if env_type == "ssh":

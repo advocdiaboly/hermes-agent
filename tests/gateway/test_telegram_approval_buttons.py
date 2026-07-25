@@ -149,6 +149,29 @@ class TestTelegramExecApproval:
         assert buttons == ["✅ Allow Once", "✅ Session", "❌ Deny"]
 
     @pytest.mark.asyncio
+    async def test_one_operation_scope_only_offers_once_and_deny(self, monkeypatch):
+        adapter = _make_adapter()
+        adapter._bot.send_message = AsyncMock(return_value=SimpleNamespace(message_id=42))
+        buttons = []
+        monkeypatch.setattr(
+            "plugins.platforms.telegram.adapter.InlineKeyboardButton",
+            lambda text, callback_data: buttons.append((text, callback_data)) or text,
+        )
+        monkeypatch.setattr(
+            "plugins.platforms.telegram.adapter.InlineKeyboardMarkup", lambda rows: rows
+        )
+
+        await adapter.send_exec_approval(
+            chat_id="12345",
+            command="Rename current Telegram topic",
+            session_key="s",
+            allow_permanent=False,
+            allow_session=False,
+        )
+
+        assert [label for label, _ in buttons] == ["✅ Allow Once", "❌ Deny"]
+
+    @pytest.mark.asyncio
     async def test_stores_approval_state(self):
         adapter = _make_adapter()
         mock_msg = MagicMock()
@@ -312,6 +335,45 @@ class TestTelegramApprovalCallback:
 
         # State should be cleaned up
         assert 1 not in adapter._approval_state
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("requested_choice", ["session", "always"])
+    async def test_one_operation_callback_normalizes_broader_choice(
+        self, requested_choice,
+    ):
+        adapter = _make_adapter()
+        adapter._bot.send_message = AsyncMock(return_value=SimpleNamespace(message_id=42))
+        await adapter.send_exec_approval(
+            chat_id="12345",
+            command="Rename current Telegram topic",
+            session_key="one-operation-session",
+            allow_permanent=False,
+            allow_session=False,
+        )
+        approval_id = next(iter(adapter._approval_state))
+
+        query = AsyncMock()
+        query.data = f"ea:{requested_choice}:{approval_id}"
+        query.message = MagicMock()
+        query.message.chat_id = 12345
+        query.from_user = MagicMock()
+        query.from_user.first_name = "Norbert"
+        query.from_user.id = "12345"
+        query.answer = AsyncMock()
+        query.edit_message_text = AsyncMock()
+
+        update = MagicMock()
+        update.callback_query = query
+        context = MagicMock()
+
+        with patch.dict(os.environ, {"TELEGRAM_ALLOWED_USERS": "*"}, clear=False):
+            with patch(
+                "tools.approval.resolve_gateway_approval", return_value=1
+            ) as resolve:
+                await adapter._handle_callback_query(update, context)
+
+        resolve.assert_called_once_with("one-operation-session", "once")
+        assert query.answer.call_args.kwargs["text"] == "✅ Approved once"
 
     @pytest.mark.asyncio
     async def test_resume_typing_after_inline_approval(self):

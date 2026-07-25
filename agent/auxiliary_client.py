@@ -113,6 +113,17 @@ from utils import base_url_host_matches, base_url_hostname, env_float, model_for
 logger = logging.getLogger(__name__)
 
 
+def _call_provider_create(create, **kwargs):
+    """Invoke one synchronous SDK create call and count the real attempt."""
+
+    try:
+        from agent.tool_search_telemetry import note_api_call
+        note_api_call()
+    except Exception:
+        logger.debug("auxiliary provider-attempt telemetry skipped", exc_info=True)
+    return create(**kwargs)
+
+
 # ── resolve_provider_client fall-through dedup ───────────────────────────
 # Both fall-through warning sites in resolve_provider_client (the "unknown
 # provider" and "unhandled auth_type" branches) fire on every retry of a
@@ -3627,7 +3638,11 @@ def _retry_same_provider_sync(
     if _is_anthropic_compat_endpoint(resolved_provider, retry_base):
         retry_kwargs["messages"] = _convert_openai_images_to_anthropic(retry_kwargs["messages"])
     return _validate_llm_response(
-        retry_client.chat.completions.create(**retry_kwargs), task,
+        _call_provider_create(
+            retry_client.chat.completions.create,
+            **retry_kwargs,
+        ),
+        task,
     )
 
 
@@ -3873,7 +3888,12 @@ def _call_fallback_candidate_sync(
         base_url=fb_base)
     try:
         return _validate_llm_response(
-            fb_client.chat.completions.create(**fb_kwargs), task)
+            _call_provider_create(
+                fb_client.chat.completions.create,
+                **fb_kwargs,
+            ),
+            task,
+        )
     except Exception as fb_err:
         if not _is_auth_error(fb_err):
             raise
@@ -3890,7 +3910,12 @@ def _call_fallback_candidate_sync(
                     base_url=str(getattr(retry_client, "base_url", "") or fb_base))
                 try:
                     return _validate_llm_response(
-                        retry_client.chat.completions.create(**retry_kwargs), task)
+                        _call_provider_create(
+                            retry_client.chat.completions.create,
+                            **retry_kwargs,
+                        ),
+                        task,
+                    )
                 except Exception as retry_err:
                     if not _is_auth_error(retry_err):
                         raise
@@ -7077,7 +7102,10 @@ def call_llm(
         kwargs["stream"] = True
         if stream_options:
             kwargs["stream_options"] = stream_options
-        return client.chat.completions.create(**kwargs)
+        return _call_provider_create(
+            client.chat.completions.create,
+            **kwargs,
+        )
 
     # Handle unsupported temperature, max_tokens vs max_completion_tokens retry,
     # then payment fallback.
@@ -7100,8 +7128,14 @@ def call_llm(
         # for the transient retry every auxiliary task shares. (PR #16587)
         try:
             return _validate_llm_response(
-                client.chat.completions.create(**kwargs), task,
-                provider=resolved_provider, base_url=_base_info)
+                _call_provider_create(
+                    client.chat.completions.create,
+                    **kwargs,
+                ),
+                task,
+                provider=resolved_provider,
+                base_url=_base_info,
+            )
         except Exception as transient_err:
             if not _is_transient_transport_error(transient_err):
                 raise
@@ -7133,7 +7167,12 @@ def call_llm(
                 time.sleep(_backoff)
                 try:
                     return _validate_llm_response(
-                        client.chat.completions.create(**kwargs), task)
+                        _call_provider_create(
+                            client.chat.completions.create,
+                            **kwargs,
+                        ),
+                        task,
+                    )
                 except Exception as retry_transient:
                     if not _is_transient_transport_error(retry_transient):
                         raise
@@ -7150,7 +7189,12 @@ def call_llm(
             )
             try:
                 return _validate_llm_response(
-                    client.chat.completions.create(**retry_kwargs), task)
+                    _call_provider_create(
+                        client.chat.completions.create,
+                        **retry_kwargs,
+                    ),
+                    task,
+                )
             except Exception as retry_err:
                 retry_err_str = str(retry_err)
                 # If retry still fails, fall through to the max_tokens /
@@ -7188,7 +7232,12 @@ def call_llm(
             kwargs.pop("max_completion_tokens", None)
             try:
                 return _validate_llm_response(
-                    client.chat.completions.create(**kwargs), task)
+                    _call_provider_create(
+                        client.chat.completions.create,
+                        **kwargs,
+                    ),
+                    task,
+                )
             except Exception as retry_err:
                 # If the max_tokens retry also hits a payment or connection
                 # error, fall through to the fallback chain below.
@@ -7218,7 +7267,12 @@ def call_llm(
                 kwargs["model"] = healed_model
                 try:
                     return _validate_llm_response(
-                        client.chat.completions.create(**kwargs), task)
+                        _call_provider_create(
+                            client.chat.completions.create,
+                            **kwargs,
+                        ),
+                        task,
+                    )
                 except Exception as retry_err:
                     first_err = retry_err
 
@@ -7251,7 +7305,12 @@ def call_llm(
                     kwargs["model"] = refreshed_model
                 try:
                     return _validate_llm_response(
-                        refreshed_client.chat.completions.create(**kwargs), task)
+                        _call_provider_create(
+                            refreshed_client.chat.completions.create,
+                            **kwargs,
+                        ),
+                        task,
+                    )
                 except Exception as retry_err:
                     if not (
                         _is_auth_error(retry_err)
@@ -7279,7 +7338,12 @@ def call_llm(
                 if refreshed_model and refreshed_model != kwargs.get("model"):
                     kwargs["model"] = refreshed_model
                 return _validate_llm_response(
-                    refreshed_client.chat.completions.create(**kwargs), task)
+                    _call_provider_create(
+                        refreshed_client.chat.completions.create,
+                        **kwargs,
+                    ),
+                    task,
+                )
 
         # ── Auth refresh retry ───────────────────────────────────────
         auth_refresh_provider = _auth_refresh_provider_for_route(
@@ -7328,7 +7392,12 @@ def call_llm(
             if _is_rate_limit_error(first_err) and not _is_payment_error(first_err):
                 try:
                     return _validate_llm_response(
-                        client.chat.completions.create(**kwargs), task)
+                        _call_provider_create(
+                            client.chat.completions.create,
+                            **kwargs,
+                        ),
+                        task,
+                    )
                 except Exception as retry_err:
                     if not (_is_auth_error(retry_err) or _is_payment_error(retry_err) or _is_rate_limit_error(retry_err)):
                         raise

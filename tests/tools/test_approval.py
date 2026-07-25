@@ -1247,6 +1247,42 @@ class TestSmartDeniedPrompt:
         assert result == "deny"
 
 
+class TestOneOperationPrompt:
+    @pytest.mark.parametrize("callback_choice", ["session", "always"])
+    def test_callback_cannot_expand_one_operation_scope(self, callback_choice):
+        captured = {}
+
+        def callback(_command, _description, **kwargs):
+            captured.update(kwargs)
+            return callback_choice
+
+        result = prompt_dangerous_approval(
+            "Rename current Telegram topic",
+            "Telegram topic lifecycle change",
+            allow_permanent=False,
+            allow_session=False,
+            approval_callback=callback,
+        )
+
+        assert captured["allow_session"] is False
+        assert result == "deny"
+
+    @pytest.mark.parametrize("choice", ["session", "always"])
+    def test_stdin_cannot_expand_one_operation_scope(self, choice, capsys):
+        with mock_patch("builtins.input", return_value=choice):
+            result = prompt_dangerous_approval(
+                "Rename current Telegram topic",
+                "Telegram topic lifecycle change",
+                allow_permanent=False,
+                allow_session=False,
+            )
+
+        rendered = capsys.readouterr().out
+        assert "[s]ession" not in rendered
+        assert "[a]lways" not in rendered
+        assert result == "deny"
+
+
 class TestForkBombDetection:
     """The fork bomb regex must match the classic :(){ :|:& };: pattern."""
 
@@ -2561,3 +2597,160 @@ class TestApprovalPromptRedaction:
         # The script's credential must not appear in the user-facing message.
         assert "sk-proj-abc123xyz4567890abcdef" not in result["message"]
         assert "sk-proj-abc123xyz4567890abcdef" not in result["command"]
+
+
+class TestElicitationConsentScope:
+    def test_cli_and_gateway_elicitation_are_one_operation_only(self):
+        from tools import approval
+
+        cli_kwargs = {}
+
+        def prompt(_message, _description, **kwargs):
+            cli_kwargs.update(kwargs)
+            return "once"
+
+        with mock_patch.object(
+            approval, "_is_gateway_approval_context", return_value=False
+        ), mock_patch.object(
+            approval, "prompt_dangerous_approval", side_effect=prompt
+        ):
+            assert (
+                approval.request_elicitation_consent(
+                    "Rename the current Telegram topic.",
+                    "Telegram topic lifecycle change.",
+                )
+                == "accept"
+            )
+
+        gateway_data = {}
+
+        def await_decision(_session_key, _notify_cb, approval_data, **_kwargs):
+            gateway_data.update(approval_data)
+            return {"resolved": True, "choice": "once"}
+
+        with mock_patch.object(
+            approval, "_is_gateway_approval_context", return_value=True
+        ), mock_patch.object(
+            approval, "get_current_session_key", return_value="telegram-session"
+        ), mock_patch.dict(
+            approval._gateway_notify_cbs,
+            {"telegram-session": lambda _data: None},
+            clear=True,
+        ), mock_patch.object(
+            approval, "_await_gateway_decision", side_effect=await_decision
+        ), mock_patch.object(
+            approval, "approve_session"
+        ) as approve_session, mock_patch.object(
+            approval, "approve_permanent"
+        ) as approve_permanent:
+            assert (
+                approval.request_elicitation_consent(
+                    "Rename the current Telegram topic.",
+                    "Telegram topic lifecycle change.",
+                    surface="telegram-topic-lifecycle",
+                )
+                == "accept"
+            )
+
+        assert cli_kwargs["allow_permanent"] is False
+        assert cli_kwargs["allow_session"] is False
+        assert gateway_data["allow_permanent"] is False
+        assert gateway_data["allow_session"] is False
+        approve_session.assert_not_called()
+        approve_permanent.assert_not_called()
+
+    @pytest.mark.parametrize("choice", ["session", "always"])
+    def test_one_operation_elicitation_rejects_broader_choice(self, choice):
+        from tools import approval
+
+        with mock_patch.object(
+            approval, "_is_gateway_approval_context", return_value=True
+        ), mock_patch.object(
+            approval, "get_current_session_key", return_value="telegram-session"
+        ), mock_patch.dict(
+            approval._gateway_notify_cbs,
+            {"telegram-session": lambda _data: None},
+            clear=True,
+        ), mock_patch.object(
+            approval,
+            "_await_gateway_decision",
+            return_value={"resolved": True, "choice": choice},
+        ):
+            result = approval.request_elicitation_consent(
+                "Rename the current Telegram topic.",
+                "Telegram topic lifecycle change.",
+                surface="telegram-topic-lifecycle",
+            )
+
+        assert result == "decline"
+
+    def test_missing_gateway_callback_fails_closed(self):
+        from tools import approval
+
+        with mock_patch.object(
+            approval, "_is_gateway_approval_context", return_value=True
+        ), mock_patch.object(
+            approval, "get_current_session_key", return_value="telegram-session"
+        ), mock_patch.dict(
+            approval._gateway_notify_cbs, {}, clear=True
+        ):
+            result = approval.request_elicitation_consent(
+                "Rename the current Telegram topic.",
+                "Telegram topic lifecycle change.",
+                surface="telegram-topic-lifecycle",
+            )
+
+        assert result == "decline"
+
+    @pytest.mark.parametrize(
+        ("decision", "expected"),
+        [
+            ({"resolved": False, "choice": None}, "cancel"),
+            ({"resolved": True, "choice": "deny"}, "decline"),
+        ],
+    )
+    def test_gateway_timeout_and_denial_fail_closed(self, decision, expected):
+        from tools import approval
+
+        with mock_patch.object(
+            approval, "_is_gateway_approval_context", return_value=True
+        ), mock_patch.object(
+            approval, "get_current_session_key", return_value="telegram-session"
+        ), mock_patch.dict(
+            approval._gateway_notify_cbs,
+            {"telegram-session": lambda _data: None},
+            clear=True,
+        ), mock_patch.object(
+            approval, "_await_gateway_decision", return_value=decision
+        ):
+            result = approval.request_elicitation_consent(
+                "Rename the current Telegram topic.",
+                "Telegram topic lifecycle change.",
+                surface="telegram-topic-lifecycle",
+            )
+
+        assert result == expected
+
+    def test_gateway_dispatch_exception_fails_closed(self):
+        from tools import approval
+
+        with mock_patch.object(
+            approval, "_is_gateway_approval_context", return_value=True
+        ), mock_patch.object(
+            approval, "get_current_session_key", return_value="telegram-session"
+        ), mock_patch.dict(
+            approval._gateway_notify_cbs,
+            {"telegram-session": lambda _data: None},
+            clear=True,
+        ), mock_patch.object(
+            approval,
+            "_await_gateway_decision",
+            side_effect=RuntimeError("gateway unavailable"),
+        ):
+            result = approval.request_elicitation_consent(
+                "Rename the current Telegram topic.",
+                "Telegram topic lifecycle change.",
+                surface="telegram-topic-lifecycle",
+            )
+
+        assert result == "decline"

@@ -151,6 +151,51 @@ class TestApprovalCommandWiring:
             assert isinstance(value.func, ast.Attribute) and value.func.attr == "get"
             assert isinstance(value.args[0], ast.Constant) and value.args[0].value == name
             assert isinstance(value.args[1], ast.Constant) and value.args[1].value is default
+        assert any(
+            keyword.arg is None
+            and isinstance(keyword.value, ast.Call)
+            and isinstance(keyword.value.func, ast.Name)
+            and keyword.value.func.id == "_exec_approval_optional_capabilities"
+            for keyword in call.keywords
+        )
+
+    def test_allow_session_is_only_passed_to_compatible_adapter(self):
+        from gateway.run import _exec_approval_optional_capabilities
+
+        class LegacyAdapter:
+            async def send_exec_approval(
+                self,
+                chat_id,
+                command,
+                session_key,
+                description="dangerous command",
+                metadata=None,
+                allow_permanent=True,
+                smart_denied=False,
+            ):
+                return None
+
+        class OneOperationAdapter(LegacyAdapter):
+            async def send_exec_approval(
+                self,
+                chat_id,
+                command,
+                session_key,
+                description="dangerous command",
+                metadata=None,
+                allow_permanent=True,
+                allow_session=True,
+                smart_denied=False,
+            ):
+                return None
+
+        approval_data = {"allow_session": False}
+        assert _exec_approval_optional_capabilities(
+            LegacyAdapter(), approval_data
+        ) == {}
+        assert _exec_approval_optional_capabilities(
+            OneOperationAdapter(), approval_data
+        ) == {"allow_session": False}
 
 
 class TestApprovalTextFallbackContract:
@@ -176,6 +221,18 @@ class TestApprovalTextFallbackContract:
         )
         assert "`!approve session`" in text
         assert "approve always" not in text
+
+    def test_one_operation_only_advertises_once_and_deny(self):
+        from gateway.run import _format_exec_approval_fallback
+
+        text = _format_exec_approval_fallback(
+            "Rename current Telegram topic", "lifecycle change", "/",
+            allow_permanent=False, allow_session=False,
+        )
+        assert "`/approve`" in text
+        assert "approve session" not in text
+        assert "approve always" not in text
+        assert "`/deny`" in text
 
     def test_manual_prompt_preserves_all_choices(self):
         from gateway.run import _format_exec_approval_fallback
