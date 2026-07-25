@@ -206,6 +206,19 @@ async def _shutdown_abandoned_app(app) -> None:
         except Exception:
             logger.debug("Abandoned Telegram request shutdown failed", exc_info=True)
 
+
+async def _stop_and_shutdown_abandoned_app(app) -> None:
+    """Best-effort cleanup after an abandoned Application.start()."""
+    if app is None:
+        return
+    try:
+        if getattr(app, "running", False):
+            await app.stop()
+    except Exception:
+        logger.debug("Abandoned Telegram app.stop() failed", exc_info=True)
+    await _shutdown_abandoned_app(app)
+
+
 try:
     from telegram import Update, Bot, Message, InlineKeyboardButton, InlineKeyboardMarkup
     try:
@@ -2271,11 +2284,21 @@ class TelegramAdapter(BasePlatformAdapter):
         delete_webhook = getattr(self._bot, "delete_webhook", None)
         if not callable(delete_webhook):
             return True
+        timeout = self._env_float_clamped(
+            "HERMES_TELEGRAM_DELETE_WEBHOOK_TIMEOUT",
+            30.0,
+            min_value=0.0,
+        )
         try:
-            await delete_webhook(drop_pending_updates=False)
+            await _await_with_thread_deadline(
+                delete_webhook(drop_pending_updates=False),
+                timeout=timeout,
+            )
             return True
         except Exception as err:
-            if self._looks_like_network_error(err):
+            if isinstance(err, asyncio.TimeoutError) or self._looks_like_network_error(
+                err
+            ):
                 logger.warning(
                     "[%s] deleteWebhook failed with a recoverable network error; "
                     "continuing to polling so getUpdates/retry can recover: %s",
@@ -3599,6 +3622,7 @@ class TelegramAdapter(BasePlatformAdapter):
             # fallback-IP chain can't block startup indefinitely.
             _max_connect = 8
             _init_timeout = _env_float("HERMES_TELEGRAM_INIT_TIMEOUT", 30.0)
+            logger.warning("[%s] Telegram startup stage: initialize begin", self.name)
             for _attempt in range(_max_connect):
                 try:
                     logger.warning(
@@ -3653,7 +3677,25 @@ class TelegramAdapter(BasePlatformAdapter):
                         await asyncio.sleep(wait)
                     else:
                         raise
-            await self._app.start()
+            logger.warning("[%s] Telegram startup stage: initialize complete", self.name)
+            _app_start_timeout = self._env_float_clamped(
+                "HERMES_TELEGRAM_APP_START_TIMEOUT",
+                30.0,
+                min_value=0.0,
+            )
+            logger.warning(
+                "[%s] Telegram startup stage: application start begin", self.name
+            )
+            await _await_with_thread_deadline(
+                self._app.start(),
+                timeout=_app_start_timeout,
+                on_abandon=lambda app=self._app: (
+                    _stop_and_shutdown_abandoned_app(app)
+                ),
+            )
+            logger.warning(
+                "[%s] Telegram startup stage: application start complete", self.name
+            )
 
             # Decide between webhook and polling mode
             webhook_url = os.getenv("TELEGRAM_WEBHOOK_URL", "").strip()
@@ -3715,7 +3757,13 @@ class TelegramAdapter(BasePlatformAdapter):
                 # updates. Best-effort: a transient Bot API network error here
                 # must not fail gateway startup — degrade to background polling
                 # recovery instead.
+                logger.warning(
+                    "[%s] Telegram startup stage: deleteWebhook begin", self.name
+                )
                 await self._delete_webhook_best_effort()
+                logger.warning(
+                    "[%s] Telegram startup stage: deleteWebhook complete", self.name
+                )
 
                 loop = asyncio.get_running_loop()
 
@@ -3747,12 +3795,18 @@ class TelegramAdapter(BasePlatformAdapter):
                 # Store reference for retry use in _handle_polling_conflict
                 self._polling_error_callback_ref = _polling_error_callback
 
+                logger.warning(
+                    "[%s] Telegram startup stage: polling startup begin", self.name
+                )
                 polling_started = await self._start_polling_resilient(
                     # On a cold first boot drop the stale Bot API queue; on a
                     # watcher reconnect after an outage preserve it so messages
                     # sent while the bot was offline are delivered (#46621).
                     drop_pending_updates=not is_reconnect,
                     error_callback=_polling_error_callback,
+                )
+                logger.warning(
+                    "[%s] Telegram startup stage: polling startup complete", self.name
                 )
                 if not polling_started:
                     logger.warning(

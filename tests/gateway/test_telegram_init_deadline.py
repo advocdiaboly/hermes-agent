@@ -30,7 +30,9 @@ from plugins.platforms.telegram.adapter import TelegramAdapter  # noqa: E402
 
 
 @pytest.mark.asyncio
-async def test_connect_retries_when_initialize_wall_deadline_expires(monkeypatch):
+async def test_connect_retries_when_initialize_wall_deadline_expires(
+    monkeypatch, caplog
+):
     """A wedged initialize() attempt must not trap startup on attempt 1/8."""
     fake_app = MagicMock()
     fake_app.bot = MagicMock()
@@ -76,9 +78,84 @@ async def test_connect_retries_when_initialize_wall_deadline_expires(monkeypatch
 
     assert fake_app.initialize.call_count == 2
     assert fake_app.initialize.await_count == 1
-    assert deadline_calls == 2
+    assert deadline_calls == 3
     tg_adapter.asyncio.sleep.assert_awaited_once_with(1)
     fake_app.start.assert_awaited_once()
+    stages = [
+        record.getMessage()
+        for record in caplog.records
+        if "Telegram startup stage:" in record.getMessage()
+    ]
+    assert [message.rsplit(": ", 1)[-1] for message in stages] == [
+        "initialize begin",
+        "initialize complete",
+        "application start begin",
+        "application start complete",
+        "deleteWebhook begin",
+        "deleteWebhook complete",
+        "polling startup begin",
+        "polling startup complete",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_connect_bounds_application_start_and_marks_failure_retryable(
+    monkeypatch,
+):
+    fake_app = MagicMock()
+    fake_app.bot = MagicMock()
+    fake_app.initialize = AsyncMock(return_value=None)
+    fake_app.start = AsyncMock(return_value=None)
+    fake_app.stop = AsyncMock(return_value=None)
+    fake_app.shutdown = AsyncMock(return_value=None)
+    fake_app.running = True
+    fake_app.add_handler = MagicMock()
+
+    chainable = MagicMock()
+    chainable.token.return_value = chainable
+    chainable.request.return_value = chainable
+    chainable.get_updates_request.return_value = chainable
+    chainable.build.return_value = fake_app
+
+    builder_root = MagicMock()
+    builder_root.builder.return_value = chainable
+    monkeypatch.setattr(tg_adapter, "Application", builder_root)
+    monkeypatch.setattr(tg_adapter, "HTTPXRequest", MagicMock)
+    monkeypatch.setattr(
+        tg_adapter, "discover_fallback_ips", AsyncMock(return_value=[])
+    )
+    monkeypatch.setattr(
+        tg_adapter, "resolve_proxy_url", lambda *args, **kwargs: None
+    )
+
+    deadline_calls = 0
+    cleanup = None
+
+    async def _fake_deadline(awaitable, timeout, *, on_abandon=None):
+        nonlocal deadline_calls, cleanup
+        deadline_calls += 1
+        if deadline_calls == 2:
+            awaitable.close()
+            cleanup = on_abandon
+            raise tg_adapter.asyncio.TimeoutError()
+        return await awaitable
+
+    monkeypatch.setattr(
+        tg_adapter, "_await_with_thread_deadline", _fake_deadline
+    )
+    adapter = TelegramAdapter(
+        PlatformConfig(enabled=True, token="test-token")
+    )
+    monkeypatch.setattr(
+        adapter, "_acquire_platform_lock", lambda *args, **kwargs: True
+    )
+    monkeypatch.setattr(adapter, "_fallback_ips", lambda: [])
+
+    assert await adapter.connect() is False
+    assert deadline_calls == 2
+    assert cleanup is not None
+    assert adapter.fatal_error_code == "telegram_connect_error"
+    assert adapter.fatal_error_retryable is True
 
 
 @pytest.mark.asyncio
@@ -199,6 +276,20 @@ async def test_shutdown_abandoned_app_handles_none_and_missing_requests():
     app.shutdown = AsyncMock(side_effect=RuntimeError("still running"))
     app.bot = None
     await tg_adapter._shutdown_abandoned_app(app)  # must not raise
+
+
+@pytest.mark.asyncio
+async def test_stop_and_shutdown_abandoned_app_stops_running_app():
+    app = MagicMock()
+    app.running = True
+    app.stop = AsyncMock()
+    app.shutdown = AsyncMock()
+    app.bot = None
+
+    await tg_adapter._stop_and_shutdown_abandoned_app(app)
+
+    app.stop.assert_awaited_once()
+    app.shutdown.assert_awaited_once()
 
 
 @pytest.mark.asyncio
