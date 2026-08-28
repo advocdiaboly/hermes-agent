@@ -110,6 +110,23 @@ class TestClassification:
         assert not assembled.activated
         assert {td["function"]["name"] for td in assembled.tool_defs} == names
 
+    def test_telegram_lifecycle_surface_stays_direct_without_bridge(self):
+        from tools.registry import discover_builtin_tools
+        from tools.tool_search import ToolSearchConfig, assemble_tool_defs
+        from toolsets import _HERMES_CORE_TOOLS
+
+        discover_builtin_tools()
+        names = {"telegram_topic_status", "telegram_topic_manage"}
+        assembled = assemble_tool_defs(
+            [_td(name, f"Telegram {name}") for name in names],
+            context_length=200_000,
+            config=ToolSearchConfig.from_raw({"enabled": "on"}),
+        )
+
+        assert not assembled.activated
+        assert {td["function"]["name"] for td in assembled.tool_defs} == names
+        assert names.isdisjoint(_HERMES_CORE_TOOLS)
+
     def test_gui_surface_stays_direct_when_mcp_activates_the_bridge(self):
         """MCP/plugin tools turn Tool Search on; the session's GUI tools stay
         in the model-facing array so HUD can still name read_window_below."""
