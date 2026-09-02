@@ -175,6 +175,12 @@ All commands go through the API script. Set `GAPI` as a shorthand:
 GAPI="python ${HERMES_HOME:-$HOME/.hermes}/skills/productivity/google-workspace/scripts/google_api.py"
 ```
 
+Use the documented `$GAPI` command directly for every supported operation.
+Compose or filter its JSON output in memory or with ordinary read-only tools.
+If no matching `$GAPI` command exists, stop and tell the user the operation is
+unsupported; do not import or reimplement the helper, or read its OAuth files
+in generated code.
+
 ### Gmail
 
 ```bash
@@ -262,6 +268,10 @@ $GAPI tasks list --tasklist TASKLIST_ID --max 20 --show-completed
 # Create a task, optionally with a due date
 $GAPI tasks add --title "Pay invoice" --due 2026-08-28
 $GAPI tasks add --title "Inbox zero" --tasklist TASKLIST_ID
+
+# Update one or more supported fields on an existing task
+$GAPI tasks update TASK_ID --title "Pay invoice today" --due 2026-08-29 --status needsAction --notes "Check total"
+$GAPI tasks update TASK_ID --tasklist TASKLIST_ID --status completed
 ```
 
 ### Contacts
@@ -312,6 +322,7 @@ All commands return JSON. Parse with `jq` or read directly. Key fields:
 - **Calendar create**: `{status: "created", id, summary, htmlLink}`
 - **Tasks list**: `{tasklistId, tasklistTitle, tasks: [{id, title, status, due, updated, webViewLink}]}`
 - **Tasks add**: `{status: "created", tasklistId, tasklistTitle, id, title, due, webViewLink}`
+- **Tasks update**: `{status: "updated", tasklistId, tasklistTitle, id, title, taskStatus, due, notes, updated, webViewLink}`
 - **Drive search**: `[{id, name, mimeType, modifiedTime, webViewLink}]`
 - **Drive get**: `{id, name, mimeType, modifiedTime, size, webViewLink, parents, owners}`
 - **Drive upload**: `{status: "uploaded", id, name, mimeType, webViewLink}`
@@ -327,7 +338,7 @@ All commands return JSON. Parse with `jq` or read directly. Key fields:
 
 ## Rules
 
-1. **Never send email, create/delete calendar events, create Tasks, delete Drive files, share files, or modify Docs/Sheets without confirming with the user first.** Show what will be done (recipients, task title/due date, file IDs, content, share role) and ask for approval. For `drive delete`, prefer the default trash (reversible) over `--permanent`.
+1. **Never send email, create/delete calendar events, create or update Tasks, delete Drive files, share files, or modify Docs/Sheets without confirming with the user first.** Show what will be done (recipients, task title/due date, file IDs, content, share role) and ask for approval. For `drive delete`, prefer the default trash (reversible) over `--permanent`.
 2. **Check auth before first use** — run `setup.py --check`. If it fails, guide the user through setup.
 3. **Use the Gmail search syntax reference** for complex queries — load it with `skill_view("google-workspace", file_path="references/gmail-search-syntax.md")`.
 4. **Calendar times must include timezone** — always use ISO 8601 with offset (e.g., `2026-03-01T10:00:00-06:00`) or UTC (`Z`).

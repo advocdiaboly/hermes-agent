@@ -198,6 +198,152 @@ def test_tasks_add_uses_python_fallback(api_module, monkeypatch, capsys):
     }
 
 
+def test_tasks_update_uses_python_fallback(api_module, monkeypatch, capsys):
+    captured = {}
+
+    class Request:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def execute(self):
+            return self.payload
+
+    class TaskLists:
+        def list(self, **kwargs):
+            assert kwargs == {"maxResults": 10}
+            return Request({"items": [{"id": "list-1", "title": "My Tasks"}]})
+
+    class Tasks:
+        def patch(self, **kwargs):
+            captured.update(kwargs)
+            return Request({
+                "id": kwargs["task"],
+                **kwargs["body"],
+                "updated": "2026-09-02T10:00:00Z",
+                "webViewLink": "https://tasks.google.test/task-1",
+            })
+
+    class Service:
+        def tasklists(self):
+            return TaskLists()
+
+        def tasks(self):
+            return Tasks()
+
+    monkeypatch.setattr(api_module, "_gws_binary", lambda: None)
+    monkeypatch.setattr(
+        api_module,
+        "build_service",
+        lambda api, version: Service() if (api, version) == ("tasks", "v1") else None,
+    )
+    args = api_module.argparse.Namespace(
+        task_id="task-1",
+        tasklist="",
+        title="Paid invoice",
+        due="2026-09-02",
+        status="completed",
+        notes="Paid in full",
+    )
+
+    api_module.tasks_update(args)
+
+    assert captured == {
+        "tasklist": "list-1",
+        "task": "task-1",
+        "body": {
+            "title": "Paid invoice",
+            "due": "2026-09-02T00:00:00Z",
+            "status": "completed",
+            "notes": "Paid in full",
+        },
+    }
+    assert json.loads(capsys.readouterr().out) == {
+        "status": "updated",
+        "tasklistId": "list-1",
+        "tasklistTitle": "My Tasks",
+        "id": "task-1",
+        "title": "Paid invoice",
+        "taskStatus": "completed",
+        "due": "2026-09-02T00:00:00Z",
+        "notes": "Paid in full",
+        "updated": "2026-09-02T10:00:00Z",
+        "webViewLink": "https://tasks.google.test/task-1",
+    }
+
+
+def test_tasks_update_uses_gws_with_only_supplied_fields(api_module, monkeypatch, capsys):
+    calls = []
+
+    def fake_run(parts, *, params=None, body=None):
+        calls.append((parts, params, body))
+        if parts == ["tasks", "tasklists", "list"]:
+            return {"items": [{"id": "list-1", "title": "My Tasks"}]}
+        return {
+            "id": "task-1",
+            "title": "Pay invoice",
+            "status": body["status"],
+            "notes": body["notes"],
+            "updated": "2026-09-02T10:00:00Z",
+            "webViewLink": "https://tasks.google.test/task-1",
+        }
+
+    monkeypatch.setattr(api_module, "_run_gws", fake_run)
+    args = api_module.argparse.Namespace(
+        task_id="task-1",
+        tasklist="",
+        title=None,
+        due=None,
+        status="completed",
+        notes="Paid in full",
+    )
+
+    api_module.tasks_update(args)
+
+    assert calls == [
+        (["tasks", "tasklists", "list"], {"maxResults": 10}, None),
+        (
+            ["tasks", "tasks", "patch"],
+            {"tasklist": "list-1", "task": "task-1"},
+            {"status": "completed", "notes": "Paid in full"},
+        ),
+    ]
+    assert json.loads(capsys.readouterr().out) == {
+        "status": "updated",
+        "tasklistId": "list-1",
+        "tasklistTitle": "My Tasks",
+        "id": "task-1",
+        "title": "Pay invoice",
+        "taskStatus": "completed",
+        "due": "",
+        "notes": "Paid in full",
+        "updated": "2026-09-02T10:00:00Z",
+        "webViewLink": "https://tasks.google.test/task-1",
+    }
+
+
+def test_tasks_update_rejects_empty_patch_before_backend(api_module, monkeypatch, capsys):
+    def unexpected_run(*args, **kwargs):
+        raise AssertionError("backend must not run for an empty update")
+
+    monkeypatch.setattr(api_module, "_run_gws", unexpected_run)
+    args = api_module.argparse.Namespace(
+        task_id="task-1",
+        tasklist="",
+        title=None,
+        due=None,
+        status=None,
+        notes=None,
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        api_module.tasks_update(args)
+
+    assert exc.value.code == 2
+    assert capsys.readouterr().err == (
+        "At least one of --title, --due, --status, or --notes is required.\n"
+    )
+
+
 def test_tasks_list_uses_gws_and_normalizes_output(api_module, monkeypatch, capsys):
     calls = []
 
@@ -241,7 +387,7 @@ def test_tasks_list_uses_gws_and_normalizes_output(api_module, monkeypatch, caps
     }
 
 
-def test_tasks_cli_exposes_list_and_add_commands():
+def test_tasks_cli_exposes_list_add_and_update_commands(api_module, monkeypatch, capsys):
     result = subprocess.run(
         [sys.executable, str(API_PATH), "tasks", "--help"],
         capture_output=True,
@@ -252,6 +398,22 @@ def test_tasks_cli_exposes_list_and_add_commands():
     assert result.returncode == 0, result.stderr
     assert "list" in result.stdout
     assert "add" in result.stdout
+    assert "update" in result.stdout
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [str(API_PATH), "tasks", "update", "--help"],
+    )
+    with pytest.raises(SystemExit) as exc:
+        api_module.main()
+
+    assert exc.value.code == 0
+    update_help = capsys.readouterr().out
+    assert "--title" in update_help
+    assert "--due" in update_help
+    assert "--status" in update_help
+    assert "--notes" in update_help
 
 
 

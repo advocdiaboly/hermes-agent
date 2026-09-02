@@ -19,6 +19,7 @@ Usage:
   python google_api.py sheets append SHEET_ID RANGE --values '[[...]]'
   python google_api.py docs get DOC_ID
   python google_api.py tasks add --title "Pay invoice" [--due 2026-08-28]
+  python google_api.py tasks update TASK_ID [--title "Paid invoice"] [--status completed]
 """
 
 import argparse
@@ -666,6 +667,51 @@ def tasks_add(args):
     }, indent=2, ensure_ascii=False))
 
 
+def tasks_update(args):
+    body = {
+        field: value
+        for field in ("title", "due", "status", "notes")
+        if (value := getattr(args, field)) is not None
+    }
+    if not body:
+        print(
+            "At least one of --title, --due, --status, or --notes is required.",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+    if body.get("due"):
+        body["due"] = _tasks_due(body["due"])
+
+    if _gws_binary():
+        tasklist_id, tasklist_title = _tasks_default_list_gws(args.tasklist)
+        task = _run_gws(
+            ["tasks", "tasks", "patch"],
+            params={"tasklist": tasklist_id, "task": args.task_id},
+            body=body,
+        )
+    else:
+        service = build_service("tasks", "v1")
+        tasklist_id, tasklist_title = _tasks_default_list(service, args.tasklist)
+        task = service.tasks().patch(
+            tasklist=tasklist_id,
+            task=args.task_id,
+            body=body,
+        ).execute()
+
+    print(json.dumps({
+        "status": "updated",
+        "tasklistId": tasklist_id,
+        "tasklistTitle": tasklist_title,
+        "id": task.get("id", ""),
+        "title": task.get("title", ""),
+        "taskStatus": task.get("status", ""),
+        "due": task.get("due", ""),
+        "notes": task.get("notes", ""),
+        "updated": task.get("updated", ""),
+        "webViewLink": task.get("webViewLink", ""),
+    }, indent=2, ensure_ascii=False))
+
+
 # =========================================================================
 # Drive
 # =========================================================================
@@ -1236,6 +1282,15 @@ def main():
     p.add_argument("--due", default="", help="Due date (YYYY-MM-DD or RFC 3339)")
     p.add_argument("--tasklist", default="", help="Task list ID (defaults to the first available list)")
     p.set_defaults(func=tasks_add)
+
+    p = tasks_sub.add_parser("update")
+    p.add_argument("task_id")
+    p.add_argument("--title")
+    p.add_argument("--due", help="Due date (YYYY-MM-DD or RFC 3339)")
+    p.add_argument("--status", choices=("needsAction", "completed"))
+    p.add_argument("--notes")
+    p.add_argument("--tasklist", default="", help="Task list ID (defaults to the first available list)")
+    p.set_defaults(func=tasks_update)
 
     # --- Drive ---
     drv = sub.add_parser("drive")
