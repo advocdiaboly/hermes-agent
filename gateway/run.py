@@ -7490,6 +7490,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         self._exit_reason: Optional[str] = None
         self._exit_code: Optional[int] = None
         self._draining = False
+        self._telegram_lifecycle_accepting = True
+        self._telegram_lifecycle_tasks: set[asyncio.Task] = set()
         self._profile_failed_platforms: Dict[str, Dict[Platform, asyncio.Task]] = {}
         self._systemd_watchdog = None
         # External (NAS-driven) drain state — distinct from the shutdown
@@ -16323,6 +16325,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # blocked in adapter delivery.  Cancel and await them while adapters
             # are still alive so every watcher receives a retryable result
             # before platform teardown begins.
+            from gateway.telegram_topic_lifecycle import (
+                cancel_gateway_telegram_lifecycle_tasks,
+            )
+
+            await cancel_gateway_telegram_lifecycle_tasks(self)
             cancel_completion_batches = getattr(
                 self, "_cancel_process_completion_batch_tasks", None
             )
@@ -26472,6 +26479,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             user_name=str(context.source.user_name) if context.source.user_name else "",
             scope_id=str(getattr(context.source, "scope_id", "") or ""),
             session_key=context.session_key,
+            session_id=context.session_id,
             message_id=str(context.source.message_id) if context.source.message_id else "",
             profile=getattr(context.source, "profile", "") or "",
             async_delivery=_async_delivery,

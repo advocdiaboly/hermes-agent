@@ -229,16 +229,18 @@ def _core_tool_names() -> frozenset[str]:
         return frozenset()
 
 
-# Session-gated GUI toolsets. Off ``_HERMES_CORE_TOOLS`` so non-GUI clients
-# never pay their schema; once a session enables them they stay direct.
-_DIRECT_SURFACE_TOOLSETS = frozenset({"desktop_ui", "project"})
+# Session-gated direct toolsets. Off ``_HERMES_CORE_TOOLS`` so unrelated
+# clients never pay their schema; once a session enables them they stay direct.
+_DIRECT_SURFACE_TOOLSETS = frozenset(
+    {"desktop_ui", "project", "telegram_topic_lifecycle"}
+)
 
 
 def is_deferrable_tool_name(name: str) -> bool:
     """Return True if a tool with this name is *eligible* for deferral.
 
     A tool is deferrable iff it is registered with an MCP toolset prefix
-    OR it is neither in ``_HERMES_CORE_TOOLS`` nor a session-gated GUI
+    OR it is neither in ``_HERMES_CORE_TOOLS`` nor a session-gated direct
     surface toolset. Core and direct surface tools are never deferred even
     when their toolset is technically plugin-provided (this protects
     against accidental shadowing).
@@ -287,7 +289,7 @@ def classify_tools(tool_defs: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]
     """Split a tool-defs list into (visible, deferrable).
 
     ``visible`` retains every tool that must stay in the model-facing array:
-    every core tool, every session-gated GUI surface tool, plus any tool we
+    every core tool, every session-gated direct surface tool, plus any tool we
     can't classify. ``deferrable`` is the candidate set for catalog entry.
     """
     visible: List[Dict[str, Any]] = []

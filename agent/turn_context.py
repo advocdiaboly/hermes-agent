@@ -679,6 +679,23 @@ def build_turn_context(
     agent._relay_pending_turn_id = None
     agent._current_turn_id = turn_id
     agent._current_api_request_id = ""
+    try:
+        from agent.tool_search_telemetry import start_turn as _start_tool_search_turn
+
+        _start_tool_search_turn(
+            turn_id=turn_id,
+            session_id=agent.session_id or "",
+            user_message=(
+                persist_user_message
+                if persist_user_message is not None
+                else user_message
+            ),
+            tools=agent.tools,
+            model=agent.model,
+            provider=agent.provider or "",
+        )
+    except Exception:
+        logger.debug("tool-search turn telemetry start failed", exc_info=True)
     # Tripwire: warn (with both turn ids) when this turn starts before the
     # previous turn's turn-end persist — concurrent turns on one session
     # interleave transcript writes. Cleared in _persist_session.

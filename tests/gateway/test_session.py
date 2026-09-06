@@ -10,6 +10,7 @@ from gateway.config import Platform, HomeChannel, GatewayConfig, PlatformConfig
 from gateway.platforms.base import MessageEvent
 from gateway.session import (
     SessionEntry,
+    SessionContext,
     SessionSource,
     SessionStore,
     build_session_context,
@@ -23,6 +24,39 @@ from gateway.session import (
 # canonical_whatsapp_identifier.  Keep the tests referencing the old name
 # working without duplicating the suite.
 normalize_whatsapp_identifier = canonical_whatsapp_identifier
+
+
+def test_gateway_context_propagates_telegram_lifecycle_identity(monkeypatch):
+    from gateway.run import GatewayRunner
+    from gateway.session_context import _UNSET, _VAR_MAP, get_session_env
+
+    runner = object.__new__(GatewayRunner)
+    context = SessionContext(
+        source=SessionSource(
+            platform=Platform.TELEGRAM,
+            chat_id="-1001",
+            chat_type="forum",
+            thread_id="1",
+        ),
+        connected_platforms=[],
+        home_channels={},
+        session_key="agent:main:telegram:forum:-1001:1",
+        session_id="session-general",
+    )
+    monkeypatch.setenv("HERMES_SESSION_ID", "stale-session")
+
+    tokens = runner._set_session_env(context)
+    try:
+        assert get_session_env("HERMES_SESSION_CHAT_ID") == "-1001"
+        assert get_session_env("HERMES_SESSION_CHAT_TYPE") == "forum"
+        assert get_session_env("HERMES_SESSION_THREAD_ID") == "1"
+        assert get_session_env("HERMES_SESSION_ID") == "session-general"
+    finally:
+        runner._clear_session_env(tokens)
+        for var in _VAR_MAP.values():
+            var.set(_UNSET)
+
+    assert get_session_env("HERMES_SESSION_ID") == "stale-session"
 
 
 class TestSessionSourceRoundtrip:
@@ -753,6 +787,24 @@ class TestWhatsAppSessionKeyConsistency:
         assert build_session_key(alice) == "agent:main:telegram:group:-1002285219667:17585"
         assert build_session_key(bob) == "agent:main:telegram:group:-1002285219667:17585"
         assert build_session_key(alice) == build_session_key(bob)
+
+    def test_telegram_general_topic_has_its_own_shared_session(self):
+        general = SessionSource(
+            platform=Platform.TELEGRAM,
+            chat_id="-1002285219667",
+            chat_type="forum",
+            thread_id="1",
+            user_id="alice",
+        )
+        other = replace(general, thread_id="17585", user_id="bob")
+
+        assert build_session_key(general) == (
+            "agent:main:telegram:forum:-1002285219667:1"
+        )
+        assert build_session_key(other) == (
+            "agent:main:telegram:forum:-1002285219667:17585"
+        )
+        assert build_session_key(general) != build_session_key(other)
 
 
     def test_discord_prospective_thread_initiates_and_continues_one_session(self):
@@ -1656,5 +1708,3 @@ class TestGatewayRoutingTable:
         recovered = restarted.get_or_create_session(self._source())
         assert recovered.session_id == entry.session_id
         restarted._db.close()
-
-

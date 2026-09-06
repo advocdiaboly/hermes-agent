@@ -320,6 +320,15 @@ def _clear_tool_defs_cache() -> None:
         _tool_defs_cache.clear()
 
 
+def _copy_tool_defs(tool_defs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    try:
+        from agent.tool_search_telemetry import copy_tool_definitions
+
+        return copy_tool_definitions(tool_defs)
+    except Exception:
+        return list(tool_defs)
+
+
 def get_tool_definitions(
     enabled_toolsets: Optional[List[str]] = None,
     disabled_toolsets: Optional[List[str]] = None,
@@ -382,9 +391,9 @@ def get_tool_definitions(
             # consistent state even on a cache hit.
             global _last_resolved_tool_names
             _last_resolved_tool_names = [t["function"]["name"] for t in cached]
-            # Return a shallow copy of the list but share the dict references —
-            # schemas are treated as read-only by all known callers.
-            return list(cached)
+            # Return a shallow list copy while retaining any out-of-band
+            # assembly metadata. Schema dict references remain shared.
+            return _copy_tool_defs(cached)
 
     result = _compute_tool_definitions(enabled_toolsets, disabled_toolsets, quiet_mode,
                                        skip_tool_search_assembly=skip_tool_search_assembly)
@@ -408,9 +417,9 @@ def get_tool_definitions(
                     _tool_defs_cache.pop(next(iter(_tool_defs_cache)))
                 _tool_defs_cache[cache_key] = result
                 cached = result
-        return list(cached)
+        return _copy_tool_defs(cached)
     if quiet_mode:
-        return list(result)
+        return _copy_tool_defs(result)
     return result
 
 
@@ -694,6 +703,35 @@ def _compute_tool_definitions(
                     f"tool_search/describe/call — {_forms.get(assembly.listing_form, assembly.listing_form)}."
                 )
             filtered_tools = assembly.tool_defs
+
+            from agent.tool_search_telemetry import (
+                ToolSearchAssemblySnapshot,
+                attach_assembly_snapshot,
+            )
+
+            threshold_tokens = assembly.threshold_tokens
+            if ts_cfg.enabled == "auto":
+                threshold_tokens = (
+                    int(context_length * (ts_cfg.threshold_pct / 100.0))
+                    if context_length > 0
+                    else 20_000
+                )
+            elif ts_cfg.enabled == "on":
+                threshold_tokens = 1
+
+            snapshot_factory = (
+                ToolSearchAssemblySnapshot.active
+                if assembly.activated
+                else ToolSearchAssemblySnapshot.control
+            )
+            filtered_tools = attach_assembly_snapshot(
+                filtered_tools,
+                snapshot_factory(
+                    deferred_count=assembly.deferred_count,
+                    deferred_schema_tokens=assembly.deferred_tokens,
+                    activation_threshold_tokens=threshold_tokens,
+                ),
+            )
     except Exception as e:  # pragma: no cover — never break tool loading
         logger.warning("Tool search assembly skipped: %s", e)
 
@@ -1313,6 +1351,12 @@ def handle_function_call(
         _ts_mod = None
 
     if _ts_mod is not None and _ts_mod.is_bridge_tool(function_name):
+        try:
+            from agent.tool_search_telemetry import note_bridge_call
+
+            note_bridge_call(function_name, turn_id=turn_id)
+        except Exception:
+            logger.debug("tool-search bridge telemetry skipped", exc_info=True)
         try:
             # Use skip_tool_search_assembly=True so we see the real catalog,
             # not the already-collapsed bridge-only list (the bridge would

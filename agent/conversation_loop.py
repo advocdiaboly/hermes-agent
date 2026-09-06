@@ -16,6 +16,7 @@ resolved through :func:`_ra` so those patches keep working.
 
 from __future__ import annotations
 
+import functools
 import json
 import logging
 import os
@@ -8825,6 +8826,73 @@ def run_conversation(
         _pending_verification_response_previewed=_pending_verification_response_previewed,
     )
 
+
+
+_run_conversation_impl = run_conversation
+
+
+def _run_conversation_with_telemetry(
+    agent,
+    user_message: Any,
+    system_message: str = None,
+    conversation_history: List[Dict[str, Any]] = None,
+    task_id: str = None,
+    stream_callback: Optional[callable] = None,
+    persist_user_message: Optional[Any] = None,
+    persist_user_timestamp: Optional[float] = None,
+    persist_user_display_kind: Optional[str] = None,
+    persist_user_display_metadata: Optional[Dict[str, Any]] = None,
+    moa_config: Optional[dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Finalize best-effort turn telemetry on every exit path."""
+
+    kwargs = {
+        "system_message": system_message,
+        "conversation_history": conversation_history,
+        "task_id": task_id,
+        "stream_callback": stream_callback,
+        "persist_user_message": persist_user_message,
+        "persist_user_timestamp": persist_user_timestamp,
+        "persist_user_display_kind": persist_user_display_kind,
+        "persist_user_display_metadata": persist_user_display_metadata,
+        "moa_config": moa_config,
+    }
+    try:
+        from agent.tool_search_telemetry import (
+            begin_turn_scope,
+            end_turn_scope,
+            finish_current_turn,
+        )
+
+        scope_token = begin_turn_scope()
+    except Exception:
+        logger.debug(
+            "tool-search telemetry setup failed; running uninstrumented",
+            exc_info=True,
+        )
+        return _run_conversation_impl(agent, user_message, **kwargs)
+
+    try:
+        result = _run_conversation_impl(agent, user_message, **kwargs)
+    except BaseException as exc:
+        try:
+            finish_current_turn(exception=exc)
+        except Exception:
+            logger.debug("tool-search telemetry finalization failed", exc_info=True)
+        raise
+    else:
+        try:
+            finish_current_turn(result)
+        except Exception:
+            logger.debug("tool-search telemetry finalization failed", exc_info=True)
+        return result
+    finally:
+        end_turn_scope(scope_token)
+
+
+run_conversation = functools.wraps(_run_conversation_impl)(
+    _run_conversation_with_telemetry
+)
 
 
 __all__ = ["run_conversation"]
