@@ -8,7 +8,7 @@ import contextvars
 import inspect
 import json
 import logging
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from functools import partial
 from types import SimpleNamespace
 from typing import Any
@@ -46,6 +46,78 @@ def _relay_metadata(provider_name: str, metadata: dict[str, Any] | None) -> dict
     relay_metadata = _jsonable_dict(metadata or {})
     relay_metadata.setdefault("hermes.provider", provider_name)
     return relay_metadata
+
+
+def _telemetry_turn_id() -> str | None:
+    turn = relay_runtime.current_turn()
+    turn_id = getattr(turn, "turn_id", None)
+    return str(turn_id) if turn_id else None
+
+
+def _note_provider_attempt(provider_name: str) -> None:
+    if provider_name.strip().lower() == "moa":
+        return
+    try:
+        from agent.tool_search_telemetry import note_api_call
+
+        note_api_call(turn_id=_telemetry_turn_id())
+    except Exception:
+        logger.debug("tool-search provider-attempt telemetry skipped", exc_info=True)
+
+
+def _response_usage(response: Any) -> Any:
+    def field(value: Any, name: str) -> Any:
+        return value.get(name) if isinstance(value, Mapping) else getattr(value, name, None)
+
+    return field(response, "usage") or field(field(response, "response"), "usage")
+
+
+def _note_provider_usage(response: Any, *, provider_name: str, metadata: dict[str, Any] | None) -> bool:
+    if provider_name.strip().lower() == "moa":
+        return False
+    try:
+        from agent.tool_search_telemetry import note_api_usage
+        from agent.usage_pricing import normalize_usage
+
+        usage = normalize_usage(
+            _response_usage(response),
+            provider=provider_name,
+            api_mode=str((metadata or {}).get("api_mode") or ""),
+        )
+        if not any((usage.input_tokens, usage.output_tokens, usage.cache_read_tokens,
+                    usage.cache_write_tokens, usage.reasoning_tokens)):
+            return False
+        note_api_usage(
+            prompt_tokens=usage.prompt_tokens,
+            input_tokens=usage.input_tokens,
+            output_tokens=usage.output_tokens,
+            completion_tokens=usage.output_tokens,
+            total_tokens=usage.total_tokens,
+            cache_read_tokens=usage.cache_read_tokens,
+            cache_write_tokens=usage.cache_write_tokens,
+            reasoning_tokens=usage.reasoning_tokens,
+            turn_id=_telemetry_turn_id(),
+        )
+        return True
+    except Exception:
+        logger.debug("tool-search provider-usage telemetry skipped", exc_info=True)
+        return False
+
+
+def _call_provider(callback: Callable[[dict[str, Any]], Any], request: dict[str, Any], *,
+                   provider_name: str, metadata: dict[str, Any] | None) -> Any:
+    _note_provider_attempt(provider_name)
+    response = callback(request)
+    _note_provider_usage(response, provider_name=provider_name, metadata=metadata)
+    return response
+
+
+async def _call_provider_async(callback: Callable[[dict[str, Any]], Any], request: dict[str, Any], *,
+                               provider_name: str, metadata: dict[str, Any] | None) -> Any:
+    _note_provider_attempt(provider_name)
+    response = await callback(request)
+    _note_provider_usage(response, provider_name=provider_name, metadata=metadata)
+    return response
 
 
 class _ManagedAttempt:
@@ -123,13 +195,22 @@ class _ManagedAttempt:
     def invoke(self, callback: Callable[..., Any], next_request: Any) -> Any:
         """Provider callback handed to Relay: run ``callback`` on Relay's (possibly rewritten) request."""
         with self._recording_errors():
-            raw = self.run_callback(callback, self.provider_request(next_request))
+            raw = self.run_callback(
+                partial(_call_provider, provider_name=self.operation, metadata=self.metadata),
+                callback,
+                self.provider_request(next_request),
+            )
         return self._record(raw)
 
     async def invoke_async(self, callback: Callable[..., Any], next_request: Any) -> Any:
         async def call_provider() -> Any:
             with relay_runtime.managed_callback_guard():  # nested relay calls run unmanaged
-                return await callback(final_request)
+                return await _call_provider_async(
+                    callback,
+                    final_request,
+                    provider_name=self.operation,
+                    metadata=self.metadata,
+                )
 
         with self._recording_errors():
             final_request = self.provider_request(next_request)
@@ -182,7 +263,7 @@ def execute(
     ``session_id`` defaults to the inherited Hermes turn's session (unmanaged when there is none)."""
     attempt = _ManagedAttempt.resolve(session_id, request, metadata, name=name, model_name=model_name)
     if attempt is None:
-        return callback(request)
+        return _call_provider(callback, request, provider_name=name, metadata=metadata)
     try:
         managed = _run_awaitable(attempt.run_managed(
             attempt.runtime.relay.llm.execute, partial(attempt.invoke, callback)
@@ -199,7 +280,7 @@ async def execute_async(
     """Async ``execute``."""
     attempt = _ManagedAttempt.resolve(session_id, request, metadata, name=name, model_name=model_name)
     if attempt is None:
-        return await callback(request)
+        return await _call_provider_async(callback, request, provider_name=name, metadata=metadata)
     try:
         managed = await attempt.run_managed(attempt.runtime.relay.llm.execute, partial(attempt.invoke_async, callback))
     except BaseException as exc:
@@ -290,6 +371,8 @@ class ManagedLlmStream(Iterator[Any]):
         self._on_chunk, self._chunk_adapter, self._accept_chunk = on_chunk, chunk_adapter or _namespace, accept_chunk
         self._stream_factory, self._on_stream_created, self._finalizer = stream_factory, on_stream_created, finalizer
         self._completed_response_predicate = completed_response_predicate
+        self._telemetry_provider_name, self._telemetry_metadata = name, metadata
+        self._telemetry_usage_recorded = False
         self._raw_chunks: list[tuple[Any, Any]] = []
         self._prefetched_chunks: list[Any] = []
         attempt = _ManagedAttempt.resolve(session_id, request, metadata, name=name, model_name=model_name)
@@ -300,7 +383,9 @@ class ManagedLlmStream(Iterator[Any]):
         self._start_managed(attempt)
 
     def _start_unmanaged(self, request: dict[str, Any]) -> None:
+        _note_provider_attempt(self._telemetry_provider_name)
         raw_stream = self._stream_factory(request)
+        self._record_provider_usage(raw_stream)
         predicate = self._completed_response_predicate
         if predicate is not None and predicate(raw_stream):
             self.final_response = raw_stream
@@ -316,7 +401,12 @@ class ManagedLlmStream(Iterator[Any]):
         run_callback = attempt.run_callback
         raw_stream = None
         try:
-            raw_stream = run_callback(self._stream_factory, attempt.provider_request(next_request))
+            def open_stream(final_request: dict[str, Any]) -> Any:
+                _note_provider_attempt(self._telemetry_provider_name)
+                return self._stream_factory(final_request)
+
+            raw_stream = run_callback(open_stream, attempt.provider_request(next_request))
+            self._record_provider_usage(raw_stream)
             predicate = self._completed_response_predicate
             if predicate is not None and run_callback(predicate, raw_stream):
                 self.final_response = raw_stream
@@ -333,6 +423,7 @@ class ManagedLlmStream(Iterator[Any]):
                 if self._accept_chunk is not None and not run_callback(self._accept_chunk, chunk):
                     break
                 encoded_chunk = _jsonable(chunk)
+                self._record_provider_usage(chunk)
                 self._raw_chunks.append((encoded_chunk, chunk))
                 yield encoded_chunk
             self._provider_completed = True
@@ -357,6 +448,7 @@ class ManagedLlmStream(Iterator[Any]):
             response = self.final_response
             if response is None:
                 response = attempt.run_callback(self._finalizer)
+            self._record_provider_usage(response)
             if self._logical_model_name is not None:
                 self._logical_response_model_name = _response_model_name(response)
             return _jsonable(response)
@@ -396,6 +488,14 @@ class ManagedLlmStream(Iterator[Any]):
     def __iter__(self) -> "ManagedLlmStream":
         return self
 
+    def _record_provider_usage(self, response: Any) -> None:
+        if not self._telemetry_usage_recorded:
+            self._telemetry_usage_recorded = _note_provider_usage(
+                response,
+                provider_name=self._telemetry_provider_name,
+                metadata=self._telemetry_metadata,
+            )
+
     def _prime_completed_response(self) -> None:
         """Advance once while preserving a genuine first chunk."""
         if not self._closed and not self._prefetched_chunks:
@@ -433,6 +533,7 @@ class ManagedLlmStream(Iterator[Any]):
             if chunk is self or (self._accept_chunk is not None and not self._accept_chunk(chunk)):
                 self._close(logical_outcome="cancelled")
                 raise StopIteration
+            self._record_provider_usage(chunk)
             return chunk
 
         async def next_chunk() -> Any:

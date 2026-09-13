@@ -9,6 +9,7 @@ from hermes_state import SessionDB
 from gateway.config import Platform, HomeChannel, GatewayConfig, PlatformConfig
 from gateway.platforms.event import MessageEvent
 from gateway.session import (
+    SessionContext,
     SessionEntry,
     SessionSource,
     SessionStore,
@@ -23,6 +24,36 @@ from gateway.session import (
 # canonical_whatsapp_identifier.  Keep the tests referencing the old name
 # working without duplicating the suite.
 normalize_whatsapp_identifier = canonical_whatsapp_identifier
+
+
+def test_gateway_context_propagates_telegram_lifecycle_identity(monkeypatch):
+    from gateway.run import GatewayRunner
+    from gateway.session_context import _UNSET, _VAR_MAP, get_session_env
+
+    runner = object.__new__(GatewayRunner)
+    context = SessionContext(
+        source=SessionSource(
+            platform=Platform.TELEGRAM,
+            chat_id="-1001",
+            chat_type="forum",
+            thread_id="1",
+        ),
+        connected_platforms=[],
+        home_channels={},
+        session_key="agent:main:telegram:forum:-1001:1",
+        session_id="session-general",
+    )
+    monkeypatch.setenv("HERMES_SESSION_ID", "stale-session")
+
+    tokens = runner._set_session_env(context)
+    try:
+        assert get_session_env("HERMES_SESSION_ID") == "session-general"
+    finally:
+        runner._clear_session_env(tokens)
+        for var in _VAR_MAP.values():
+            var.set(_UNSET)
+
+    assert get_session_env("HERMES_SESSION_ID") == "stale-session"
 
 
 class TestSessionSourceRoundtrip:
@@ -1657,5 +1688,4 @@ class TestGatewayRoutingTable:
         recovered = restarted.get_or_create_session(self._source())
         assert recovered.session_id == entry.session_id
         restarted._db.close()
-
 

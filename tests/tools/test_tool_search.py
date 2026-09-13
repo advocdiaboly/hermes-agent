@@ -96,6 +96,23 @@ class TestClassification:
             assert not is_deferrable_tool_name(name), name
             assert name not in _HERMES_CORE_TOOLS
 
+    def test_telegram_lifecycle_surface_stays_direct_without_bridge(self):
+        from tools.registry import discover_builtin_tools
+        from tools.tool_search import ToolSearchConfig, assemble_tool_defs
+        from toolsets import _HERMES_CORE_TOOLS
+
+        discover_builtin_tools()
+        names = {"telegram_topic_status", "telegram_topic_manage"}
+        assembled = assemble_tool_defs(
+            [_td(name, f"Telegram {name}") for name in names],
+            context_length=200_000,
+            config=ToolSearchConfig.from_raw({"enabled": "on"}),
+        )
+
+        assert not assembled.activated
+        assert {td["function"]["name"] for td in assembled.tool_defs} == names
+        assert names.isdisjoint(_HERMES_CORE_TOOLS)
+
     def test_gui_surface_defers_by_default(self):
         """2026-08 core-deferral reversal: the curated defer set (GUI surface
         included) hides behind the bridge BY DEFAULT. project tools not in

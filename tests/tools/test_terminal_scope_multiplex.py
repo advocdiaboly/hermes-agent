@@ -12,6 +12,8 @@ unresolvable policy fails closed.
 
 import json
 import os
+import threading
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
@@ -124,6 +126,41 @@ def test_routed_turn_reads_every_terminal_consumer_from_profile(
     assert get_terminal_scope() is None
     # Process env untouched — the launch profile's own turns are unchanged.
     assert os.environ["TERMINAL_DOCKER_VOLUMES"] == _LAUNCH_VOLUMES
+
+
+def test_concurrent_profiles_keep_backend_image_cwd_and_mounts_isolated(tmp_path):
+    import gateway.run as gw
+
+    alpha = _profile(
+        tmp_path,
+        "alpha",
+        "terminal:\n  backend: local\n  cwd: /alpha\n  docker_image: alpha:1\n"
+        "  docker_volumes: [/host/a:/data:ro]\n",
+    )
+    beta = _profile(
+        tmp_path,
+        "beta",
+        "terminal:\n  backend: docker\n  cwd: /beta\n  docker_image: beta:1\n"
+        "  docker_volumes: [/host/b:/data:rw]\n",
+    )
+    barrier = threading.Barrier(2)
+
+    def observe(home):
+        with gw._profile_runtime_scope(home):
+            barrier.wait(timeout=2)
+            return (
+                terminal_env("TERMINAL_ENV"),
+                terminal_env("TERMINAL_DOCKER_IMAGE"),
+                terminal_env("TERMINAL_CWD"),
+                json.loads(terminal_env("TERMINAL_DOCKER_VOLUMES", "[]")),
+            )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        alpha_seen = pool.submit(observe, alpha)
+        beta_seen = pool.submit(observe, beta)
+
+    assert alpha_seen.result() == ("local", "alpha:1", "/alpha", ["/host/a:/data:ro"])
+    assert beta_seen.result() == ("docker", "beta:1", "/beta", ["/host/b:/data:rw"])
 
 
 def test_profile_omitting_keys_gets_defaults_not_launch_values(tmp_path):

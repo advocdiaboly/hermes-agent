@@ -179,6 +179,15 @@ def get_session_env(name: str, default: str = "") -> str:
     return os.getenv(name, default)
 
 
+def get_session_context_value(name: str, default: str = "") -> str:
+    """Read only task-local session state, never process-global environment."""
+    var = _VAR_MAP.get(name)
+    if var is None:
+        return default
+    value = var.get()
+    return default if value is _UNSET else value
+
+
 # Surfaces that are not a human chat channel (gateway binds HERMES_SESSION_PLATFORM, CLI/TUI/
 # desktop bind HERMES_SESSION_SOURCE, so both are consulted).  Default-deny: an unrecognized
 # identity counts as messaging.  Mirrors LOCAL_SESSION_SOURCE_IDS in apps/desktop session-source.ts.

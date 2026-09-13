@@ -199,7 +199,15 @@ TOOLSETS = {
     # Mirrors hermes-cli; `hermes tools` platform config filters it down and
     # _get_platform_tools() drops _DEFAULT_OFF_TOOLSETS unless user-enabled.
     "hermes-cron": _bundle("Default cron toolset - same core tools as hermes-cli; gated by `hermes tools`"),
-    "hermes-telegram": _bundle("Telegram bot toolset - full access for personal use (terminal has safety checks)"),
+    "telegram_topic_lifecycle": _ts(
+        "Current Telegram topic lifecycle operations",
+        ["telegram_topic_manage", "telegram_topic_status"],
+    ),
+    "hermes-telegram": _ts(
+        "Telegram bot toolset - full access for personal use (terminal has safety checks)",
+        _HERMES_CORE_TOOLS,
+        includes=["telegram_topic_lifecycle"],
+    ),
     "hermes-discord": _bundle(
         "Discord bot toolset - full access (terminal has safety checks via dangerous "
         "command approval)",

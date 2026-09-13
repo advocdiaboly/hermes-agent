@@ -904,6 +904,19 @@ def build_turn_context(
         agent, task_id, stream_callback, persist_user_message,
         persist_user_timestamp, persist_user_platform_id,
     )
+    try:
+        from agent.tool_search_telemetry import start_turn
+
+        start_turn(
+            turn_id=turn_id,
+            session_id=agent.session_id or "",
+            user_message=persist_user_message if persist_user_message is not None else user_message,
+            tools=agent.tools,
+            model=agent.model,
+            provider=agent.provider or "",
+        )
+    except Exception:
+        logger.debug("tool-search turn telemetry start failed", exc_info=True)
     _reset_per_turn_agent_state(agent)
 
     _preview_text = summarize_user_message_for_log(user_message)

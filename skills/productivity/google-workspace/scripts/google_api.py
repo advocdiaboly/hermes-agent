@@ -18,6 +18,8 @@ Usage:
   python google_api.py sheets update SHEET_ID RANGE --values '[[...]]'
   python google_api.py sheets append SHEET_ID RANGE --values '[[...]]'
   python google_api.py docs get DOC_ID
+  python google_api.py tasks add --title "Pay invoice" [--due 2026-08-28]
+  python google_api.py tasks update TASK_ID [--title "Paid invoice"] [--status completed]
 """
 
 import argparse
@@ -51,6 +53,7 @@ SCOPES = [
     "https://www.googleapis.com/auth/contacts.readonly",
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/documents",
+    "https://www.googleapis.com/auth/tasks",
 ]
 
 
@@ -562,6 +565,151 @@ def calendar_delete(args):
     service = build_service("calendar", "v3")
     service.events().delete(calendarId=args.calendar, eventId=args.event_id).execute()
     print(json.dumps({"status": "deleted", "eventId": args.event_id}))
+
+
+# =========================================================================
+# Tasks
+# =========================================================================
+
+
+def _tasks_first_list(result: dict) -> tuple[str, str]:
+    items = result.get("items", [])
+    if not items:
+        print("No Google Tasks lists found.", file=sys.stderr)
+        sys.exit(1)
+    first = items[0]
+    return first["id"], first.get("title", "")
+
+
+def _tasks_default_list(service, requested: str = "") -> tuple[str, str]:
+    if requested:
+        return requested, requested
+    return _tasks_first_list(service.tasklists().list(maxResults=10).execute())
+
+
+def _tasks_default_list_gws(requested: str = "") -> tuple[str, str]:
+    if requested:
+        return requested, requested
+    return _tasks_first_list(
+        _run_gws(["tasks", "tasklists", "list"], params={"maxResults": 10})
+    )
+
+
+def _task_summary(task: dict) -> dict:
+    return {
+        "id": task.get("id", ""),
+        "title": task.get("title", ""),
+        "status": task.get("status", ""),
+        "due": task.get("due", ""),
+        "updated": task.get("updated", ""),
+        "webViewLink": task.get("webViewLink", ""),
+    }
+
+
+def _tasks_due(raw_due: str) -> str:
+    if "T" not in raw_due:
+        return raw_due + "T00:00:00Z"
+    return _datetime_with_timezone(raw_due)
+
+
+def tasks_list(args):
+    if _gws_binary():
+        tasklist_id, tasklist_title = _tasks_default_list_gws(args.tasklist)
+        result = _run_gws(
+            ["tasks", "tasks", "list"],
+            params={
+                "tasklist": tasklist_id,
+                "maxResults": args.max,
+                "showCompleted": args.show_completed,
+            },
+        )
+    else:
+        service = build_service("tasks", "v1")
+        tasklist_id, tasklist_title = _tasks_default_list(service, args.tasklist)
+        result = service.tasks().list(
+            tasklist=tasklist_id,
+            maxResults=args.max,
+            showCompleted=args.show_completed,
+        ).execute()
+
+    print(json.dumps({
+        "tasklistId": tasklist_id,
+        "tasklistTitle": tasklist_title,
+        "tasks": [_task_summary(task) for task in result.get("items", [])],
+    }, indent=2, ensure_ascii=False))
+
+
+def tasks_add(args):
+    body = {"title": args.title}
+    if args.due:
+        body["due"] = _tasks_due(args.due)
+
+    if _gws_binary():
+        tasklist_id, tasklist_title = _tasks_default_list_gws(args.tasklist)
+        task = _run_gws(
+            ["tasks", "tasks", "insert"],
+            params={"tasklist": tasklist_id},
+            body=body,
+        )
+    else:
+        service = build_service("tasks", "v1")
+        tasklist_id, tasklist_title = _tasks_default_list(service, args.tasklist)
+        task = service.tasks().insert(tasklist=tasklist_id, body=body).execute()
+
+    print(json.dumps({
+        "status": "created",
+        "tasklistId": tasklist_id,
+        "tasklistTitle": tasklist_title,
+        "id": task.get("id", ""),
+        "title": task.get("title", ""),
+        "due": task.get("due", ""),
+        "webViewLink": task.get("webViewLink", ""),
+    }, indent=2, ensure_ascii=False))
+
+
+def tasks_update(args):
+    body = {
+        field: value
+        for field in ("title", "due", "status", "notes")
+        if (value := getattr(args, field)) is not None
+    }
+    if not body:
+        print(
+            "At least one of --title, --due, --status, or --notes is required.",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+    if body.get("due"):
+        body["due"] = _tasks_due(body["due"])
+
+    if _gws_binary():
+        tasklist_id, tasklist_title = _tasks_default_list_gws(args.tasklist)
+        task = _run_gws(
+            ["tasks", "tasks", "patch"],
+            params={"tasklist": tasklist_id, "task": args.task_id},
+            body=body,
+        )
+    else:
+        service = build_service("tasks", "v1")
+        tasklist_id, tasklist_title = _tasks_default_list(service, args.tasklist)
+        task = service.tasks().patch(
+            tasklist=tasklist_id,
+            task=args.task_id,
+            body=body,
+        ).execute()
+
+    print(json.dumps({
+        "status": "updated",
+        "tasklistId": tasklist_id,
+        "tasklistTitle": tasklist_title,
+        "id": task.get("id", ""),
+        "title": task.get("title", ""),
+        "taskStatus": task.get("status", ""),
+        "due": task.get("due", ""),
+        "notes": task.get("notes", ""),
+        "updated": task.get("updated", ""),
+        "webViewLink": task.get("webViewLink", ""),
+    }, indent=2, ensure_ascii=False))
 
 
 # =========================================================================
@@ -1118,6 +1266,31 @@ def main():
     p.add_argument("event_id")
     p.add_argument("--calendar", default="primary")
     p.set_defaults(func=calendar_delete)
+
+    # --- Tasks ---
+    tasks = sub.add_parser("tasks")
+    tasks_sub = tasks.add_subparsers(dest="action", required=True)
+
+    p = tasks_sub.add_parser("list")
+    p.add_argument("--tasklist", default="", help="Task list ID (defaults to the first available list)")
+    p.add_argument("--max", type=int, default=20)
+    p.add_argument("--show-completed", action="store_true")
+    p.set_defaults(func=tasks_list)
+
+    p = tasks_sub.add_parser("add")
+    p.add_argument("--title", required=True)
+    p.add_argument("--due", default="", help="Due date (YYYY-MM-DD or RFC 3339)")
+    p.add_argument("--tasklist", default="", help="Task list ID (defaults to the first available list)")
+    p.set_defaults(func=tasks_add)
+
+    p = tasks_sub.add_parser("update")
+    p.add_argument("task_id")
+    p.add_argument("--title")
+    p.add_argument("--due", help="Due date (YYYY-MM-DD or RFC 3339)")
+    p.add_argument("--status", choices=("needsAction", "completed"))
+    p.add_argument("--notes")
+    p.add_argument("--tasklist", default="", help="Task list ID (defaults to the first available list)")
+    p.set_defaults(func=tasks_update)
 
     # --- Drive ---
     drv = sub.add_parser("drive")

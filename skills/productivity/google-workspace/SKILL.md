@@ -1,7 +1,7 @@
 ---
 name: google-workspace
-description: "Gmail, Calendar, Drive, Docs, Sheets via gws CLI or Python."
-version: 1.2.0
+description: "Google Workspace email, calendar, files, and tasks."
+version: 1.3.0
 author: Nous Research
 license: MIT
 platforms: [linux, macos, windows]
@@ -12,14 +12,14 @@ required_credential_files:
     description: Google OAuth2 client credentials (downloaded from Google Cloud Console)
 metadata:
   hermes:
-    tags: [Google, Gmail, Calendar, Drive, Sheets, Docs, Contacts, Email, OAuth]
+    tags: [Google, Gmail, Calendar, Drive, Sheets, Docs, Contacts, Tasks, Email, OAuth]
     homepage: https://github.com/NousResearch/hermes-agent
     related_skills: [himalaya]
 ---
 
 # Google Workspace
 
-Gmail, Calendar, Drive, Contacts, Sheets, and Docs — through Hermes-managed OAuth and a thin CLI wrapper. When `gws` is installed, the skill uses it as the execution backend for broader Google Workspace coverage; otherwise it falls back to the bundled Python client implementation.
+Gmail, Calendar, Tasks, Drive, Contacts, Sheets, and Docs — through Hermes-managed OAuth and a thin CLI wrapper. When `gws` is installed, the skill uses it as the execution backend for broader Google Workspace coverage; otherwise it falls back to the bundled Python client implementation.
 
 ## References
 
@@ -55,7 +55,7 @@ If it prints `AUTHENTICATED`, skip to Usage — setup is already done.
 Before starting OAuth setup, ask the user TWO questions:
 
 **Question 1: "What Google services do you need? Just email, or also
-Calendar/Drive/Sheets/Docs?"**
+Calendar/Tasks/Drive/Sheets/Docs?"**
 
 - **Email only** → They don't need this skill at all. Use the `himalaya` skill
   instead — it works with a Gmail App Password (Settings → Security → App
@@ -68,6 +68,8 @@ Calendar/Drive/Sheets/Docs?"**
 
 - **Calendar/Drive/Sheets/Docs only** → Continue with this skill and use a
   narrower `--services` set like `calendar,drive,sheets,docs`.
+
+- **Tasks only** → Continue with this skill and use `--services tasks`.
 
 - **Full Workspace access** → Continue with this skill and use the default
   `all` service set.
@@ -91,7 +93,7 @@ Tell the user:
 > 2. Enable the required APIs from the API Library:
 >    https://console.cloud.google.com/apis/library
 >    Enable: Gmail API, Google Calendar API, Google Drive API,
->    Google Sheets API, Google Docs API, People API
+>    Google Sheets API, Google Docs API, Google Tasks API, People API
 > 3. Create the OAuth client here:
 >    https://console.cloud.google.com/apis/credentials
 >    Credentials → Create Credentials → OAuth 2.0 Client ID
@@ -173,6 +175,12 @@ All commands go through the API script. Set `GAPI` as a shorthand:
 GAPI="python ${HERMES_HOME:-$HOME/.hermes}/skills/productivity/google-workspace/scripts/google_api.py"
 ```
 
+Use the documented `$GAPI` command directly for every supported operation.
+Compose or filter its JSON output in memory or with ordinary read-only tools.
+If no matching `$GAPI` command exists, stop and tell the user the operation is
+unsupported; do not import or reimplement the helper, or read its OAuth files
+in generated code.
+
 ### Gmail
 
 ```bash
@@ -250,6 +258,22 @@ $GAPI drive delete FILE_ID
 $GAPI drive delete FILE_ID --permanent
 ```
 
+### Tasks
+
+```bash
+# List tasks from the first available task list
+$GAPI tasks list
+$GAPI tasks list --tasklist TASKLIST_ID --max 20 --show-completed
+
+# Create a task, optionally with a due date
+$GAPI tasks add --title "Pay invoice" --due 2026-08-28
+$GAPI tasks add --title "Inbox zero" --tasklist TASKLIST_ID
+
+# Update one or more supported fields on an existing task
+$GAPI tasks update TASK_ID --title "Pay invoice today" --due 2026-08-29 --status needsAction --notes "Check total"
+$GAPI tasks update TASK_ID --tasklist TASKLIST_ID --status completed
+```
+
 ### Contacts
 
 ```bash
@@ -296,6 +320,9 @@ All commands return JSON. Parse with `jq` or read directly. Key fields:
 - **Gmail send/reply**: `{status: "sent", id, threadId}`
 - **Calendar list**: `[{id, summary, start, end, location, description, htmlLink}]`
 - **Calendar create**: `{status: "created", id, summary, htmlLink}`
+- **Tasks list**: `{tasklistId, tasklistTitle, tasks: [{id, title, status, due, updated, webViewLink}]}`
+- **Tasks add**: `{status: "created", tasklistId, tasklistTitle, id, title, due, webViewLink}`
+- **Tasks update**: `{status: "updated", tasklistId, tasklistTitle, id, title, taskStatus, due, notes, updated, webViewLink}`
 - **Drive search**: `[{id, name, mimeType, modifiedTime, webViewLink}]`
 - **Drive get**: `{id, name, mimeType, modifiedTime, size, webViewLink, parents, owners}`
 - **Drive upload**: `{status: "uploaded", id, name, mimeType, webViewLink}`
@@ -311,7 +338,7 @@ All commands return JSON. Parse with `jq` or read directly. Key fields:
 
 ## Rules
 
-1. **Never send email, create/delete calendar events, delete Drive files, share files, or modify Docs/Sheets without confirming with the user first.** Show what will be done (recipients, file IDs, content, share role) and ask for approval. For `drive delete`, prefer the default trash (reversible) over `--permanent`.
+1. **Never send email, create/delete calendar events, create or update Tasks, delete Drive files, share files, or modify Docs/Sheets without confirming with the user first.** Show what will be done (recipients, task title/due date, file IDs, content, share role) and ask for approval. For `drive delete`, prefer the default trash (reversible) over `--permanent`.
 2. **Check auth before first use** — run `setup.py --check`. If it fails, guide the user through setup.
 3. **Use the Gmail search syntax reference** for complex queries — load it with `skill_view("google-workspace", file_path="references/gmail-search-syntax.md")`.
 4. **Calendar times must include timezone** — always use ISO 8601 with offset (e.g., `2026-03-01T10:00:00-06:00`) or UTC (`Z`).

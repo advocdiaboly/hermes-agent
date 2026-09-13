@@ -209,6 +209,15 @@ def _clear_tool_defs_cache() -> None:
         _tool_defs_cache.clear()
 
 
+def _copy_tool_defs(tool_defs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    try:
+        from agent.tool_search_telemetry import copy_tool_definitions
+
+        return copy_tool_definitions(tool_defs)
+    except Exception:
+        return list(tool_defs)
+
+
 def get_tool_definitions(enabled_toolsets: Optional[List[str]] = None, disabled_toolsets: Optional[List[str]] = None,
                          quiet_mode: bool = False, skip_tool_search_assembly: bool = False) -> List[Dict[str, Any]]:
     """Tool definitions for model API calls, filtered by toolset.
@@ -236,7 +245,7 @@ def get_tool_definitions(enabled_toolsets: Optional[List[str]] = None, disabled_
     if cached is None:
         result = compute()
         if cache_key is None:
-            return list(result)
+            return _copy_tool_defs(result)
         with _tool_defs_cache_lock:
             cached = _tool_defs_cache.get(cache_key)  # another thread may have filled it meanwhile
             if cached is None:
@@ -248,7 +257,7 @@ def get_tool_definitions(enabled_toolsets: Optional[List[str]] = None, disabled_
         _last_resolved_tool_names = [t["function"]["name"] for t in cached]
     # Always a shallow copy: run_agent appends memory/LCM schemas to its list; a
     # shared list would accumulate duplicate names (HTTP 400 from DeepSeek/Kimi/MiMo).
-    return list(cached)
+    return _copy_tool_defs(cached)
 
 
 def _tool_defs_cache_key(
@@ -515,13 +524,30 @@ def _compute_tool_definitions(enabled_toolsets: Optional[List[str]] = None, disa
         from tools.tool_search import assemble_tool_defs, load_config as _load_ts_config
         ts_cfg = _load_ts_config()
         if not skip_tool_search_assembly and ts_cfg.enabled != "off":
-            assembly = assemble_tool_defs(filtered_tools, context_length=_resolve_active_context_length(), config=ts_cfg)
+            context_length = _resolve_active_context_length()
+            assembly = assemble_tool_defs(filtered_tools, context_length=context_length, config=ts_cfg)
             if assembly.activated and not quiet_mode:
                 print(f"🔎 Tool Search (tier {assembly.tier}): {assembly.deferred_count} "
                       f"MCP/plugin tools deferred (~{assembly.deferred_tokens} tokens) behind "
                       f"tool_search/describe/call — "
                       f"{_TOOL_SEARCH_LISTING_FORMS.get(assembly.listing_form, assembly.listing_form)}.")
             filtered_tools = assembly.tool_defs
+            from agent.tool_search_telemetry import ToolSearchAssemblySnapshot, attach_assembly_snapshot
+
+            threshold_tokens = assembly.threshold_tokens
+            if ts_cfg.enabled == "auto":
+                threshold_tokens = int(context_length * ts_cfg.threshold_pct / 100) if context_length else 20_000
+            elif ts_cfg.enabled == "on":
+                threshold_tokens = 1
+            factory = ToolSearchAssemblySnapshot.active if assembly.activated else ToolSearchAssemblySnapshot.control
+            filtered_tools = attach_assembly_snapshot(
+                filtered_tools,
+                factory(
+                    deferred_count=assembly.deferred_count,
+                    deferred_schema_tokens=assembly.deferred_tokens,
+                    activation_threshold_tokens=threshold_tokens,
+                ),
+            )
     except Exception as e:  # pragma: no cover — never break tool loading
         logger.warning("Tool search assembly skipped: %s", e)
 
@@ -686,7 +712,8 @@ def _emit_post_tool_call_hook(
 
 
 def _dispatch_bridge_tool(function_name: str, function_args: Dict[str, Any],
-                          enabled_toolsets: Optional[List[str]], disabled_toolsets: Optional[List[str]]):
+                          enabled_toolsets: Optional[List[str]], disabled_toolsets: Optional[List[str]],
+                          turn_id: Optional[str] = None):
     """Handle a Tool Search bridge call (tool_search / tool_describe / tool_call).
 
     None when *function_name* is not a bridge tool; ``(result, None)`` for a
@@ -699,6 +726,12 @@ def _dispatch_bridge_tool(function_name: str, function_args: Dict[str, Any],
         return None
     if not ts.is_bridge_tool(function_name):
         return None
+    try:
+        from agent.tool_search_telemetry import note_bridge_call
+
+        note_bridge_call(function_name, turn_id=turn_id)
+    except Exception:
+        logger.debug("tool-search bridge telemetry skipped", exc_info=True)
     # Un-collapsed catalog scoped to the session's toolsets, so a restricted
     # session (subagent, kanban worker) can't reach the whole registry via the bridge.
     try:
@@ -885,7 +918,7 @@ def handle_function_call(
     # Tool Search bridge: tool_search / tool_describe are catalog reads handled
     # inline; tool_call is unwrapped so every downstream hook (pre/post, edit
     # approval, guardrails) sees the real tool name, never the bridge.
-    bridged = _dispatch_bridge_tool(function_name, function_args, enabled_toolsets, disabled_toolsets)
+    bridged = _dispatch_bridge_tool(function_name, function_args, enabled_toolsets, disabled_toolsets, turn_id)
     if bridged is not None:
         result, underlying = bridged
         if underlying is None:
