@@ -334,9 +334,21 @@ def _resolve_profile_db(profile: str):
     from hermes_state import SessionDB
     canon = profiles_mod.normalize_profile_name(profile)
     profiles_mod.validate_profile_name(canon)
+    target_home = profiles_mod.get_profile_dir(canon)
+    from hermes_constants import get_hermes_home
+    if target_home.resolve() != get_hermes_home().resolve():
+        from hermes_cli.config import check_config_version, load_config_readonly
+        # The normal loader can serve defaults/LKG after a parse failure;
+        # validate first so an unreadable policy never grants a foreign read.
+        check_config_version(raise_on_parse_error=True)
+        policy = load_config_readonly().get("session_search", {})
+        if not isinstance(policy, dict) or type(policy.get("current_profile_only", False)) is not bool:
+            raise ValueError("session_search.current_profile_only must be a boolean")
+        if policy.get("current_profile_only", False):
+            raise PermissionError("Session search is restricted to the current profile")
     if not profiles_mod.profile_exists(canon):
         raise ValueError(f"profile '{canon}' does not exist")
-    return SessionDB(db_path=profiles_mod.get_profile_dir(canon) / "state.db", read_only=True)
+    return SessionDB(db_path=target_home / "state.db", read_only=True)
 
 
 def _read_session(db, session_id: str, head: int = 20, tail: int = 10, link_profile: str = None) -> str:
@@ -477,6 +489,7 @@ def _dispatch(query, role_filter, limit, db, current_session_id, session_id,
     # split on it and adopt the embedded profile only when none was passed.
     if isinstance(session_id, str) and "/" in session_id:
         emb_profile, _, emb_id = session_id.partition("/")
+        emb_profile = emb_profile.removeprefix("@session:")
         if emb_id:
             session_id = emb_id
             if emb_profile and (profile is None or not str(profile).strip()):
