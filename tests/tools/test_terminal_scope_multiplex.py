@@ -281,6 +281,34 @@ def test_profile_terminal_config_expands_compose_host_paths(tmp_path, monkeypatc
     ]
 
 
+def test_profile_terminal_paths_expand_with_multiplex_secret_scope(tmp_path, monkeypatch):
+    from agent.secret_scope import (
+        reset_secret_scope,
+        set_multiplex_active,
+        set_secret_scope,
+    )
+    from tools.terminal_scope import build_profile_terminal_scope
+
+    monkeypatch.setenv("HERMES_HOST_DATA_DIR", "/host/hermes")
+    home = _profile(
+        tmp_path,
+        "expanded-multiplex",
+        "terminal:\n  backend: docker\n  docker_volumes:\n"
+        "    - ${HERMES_HOST_DATA_DIR}/profiles/expanded:/opt/data:ro\n",
+    )
+    set_multiplex_active(True)
+    token = set_secret_scope({})
+    try:
+        scope = build_profile_terminal_scope(home)
+    finally:
+        reset_secret_scope(token)
+        set_multiplex_active(False)
+
+    assert json.loads(scope["TERMINAL_DOCKER_VOLUMES"]) == [
+        "/host/hermes/profiles/expanded:/opt/data:ro"
+    ]
+
+
 def test_dotenv_json_strings_stay_json_strings(tmp_path):
     """The .env path already stores JSON text; str() must keep that payload."""
     from tools.terminal_scope import build_profile_terminal_scope
