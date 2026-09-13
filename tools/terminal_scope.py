@@ -132,11 +132,11 @@ def build_profile_terminal_scope(hermes_home: "Any") -> Dict[str, str]:
     except Exception as exc:
         raise TerminalPolicyUnavailable(f"cannot resolve terminal config in {home}: {exc}") from exc
     if config_exists:
-        from hermes_cli.config import fast_safe_load
+        from hermes_cli.config import _expand_env_vars, fast_safe_load
 
         try:
             with open(config_path, encoding="utf-8") as f:
-                raw = fast_safe_load(f)
+                raw = _expand_env_vars(fast_safe_load(f))
         except Exception as exc:
             raise TerminalPolicyUnavailable(f"cannot parse {config_path}: {exc}") from exc
         raw_terminal = raw.get("terminal") if isinstance(raw, dict) else None

@@ -263,6 +263,24 @@ def test_config_list_and_dict_values_are_json_not_repr(tmp_path):
         assert cfg["docker_extra_args"] == ["--network=host"]
 
 
+def test_profile_terminal_config_expands_compose_host_paths(tmp_path, monkeypatch):
+    from tools.terminal_scope import build_profile_terminal_scope
+
+    monkeypatch.setenv("HERMES_HOST_DATA_DIR", "/host/hermes")
+    home = _profile(
+        tmp_path,
+        "expanded",
+        "terminal:\n  backend: docker\n  docker_volumes:\n"
+        "    - ${HERMES_HOST_DATA_DIR}/profiles/expanded:/opt/data:ro\n",
+    )
+
+    scope = build_profile_terminal_scope(home)
+
+    assert json.loads(scope["TERMINAL_DOCKER_VOLUMES"]) == [
+        "/host/hermes/profiles/expanded:/opt/data:ro"
+    ]
+
+
 def test_dotenv_json_strings_stay_json_strings(tmp_path):
     """The .env path already stores JSON text; str() must keep that payload."""
     from tools.terminal_scope import build_profile_terminal_scope
