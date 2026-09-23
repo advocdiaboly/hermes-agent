@@ -17,6 +17,7 @@ from agent.native_compaction import (
     is_native_compaction_rejection,
     native_compaction_context_management,
     resolve_compact_threshold,
+    resolve_native_compaction_capabilities,
 )
 
 
@@ -91,6 +92,17 @@ class TestRequestGate:
             is_codex_backend=True,
         )
         assert payload is not None
+
+    @pytest.mark.parametrize("model", ("gpt-6-sol", "gpt-6-sol-900k"))
+    def test_gpt6_sol_codex_route_gets_native_payload(self, model):
+        agent = _agent(model=model, base_url="https://chatgpt.com/backend-api/codex")
+        agent.runtime_capabilities = resolve_native_compaction_capabilities(
+            model=model, base_url=agent.base_url, provider="openai-codex", is_codex_backend=True,
+        )
+        payload = native_compaction_context_management(agent, is_codex_backend=True)
+        assert payload == [
+            {"type": "compaction", "compact_threshold": DEFAULT_COMPACT_THRESHOLD}
+        ]
 
     def test_trusted_proxy_capability_gets_payload(self):
         payload = native_compaction_context_management(

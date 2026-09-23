@@ -1,9 +1,9 @@
-"""Native OpenAI Responses server-side compaction — gpt-5.6 on direct OpenAI routes only.
+"""Native OpenAI Responses server-side compaction — GPT-5.6 and GPT-6 Sol on direct OpenAI routes.
 
 ``context_management=[{"type": "compaction", "compact_threshold": N}]`` makes the server
 summarize older context into an opaque ``compaction`` item once the input crosses N tokens.
-Deliberately narrow (live-verified): gpt-5.6 only (5.1/5.2 fail server-side with no
-structured rejection) on api.openai.com or the ChatGPT Codex backend. The local compressor
+Deliberately narrow: GPT-5.6 and GPT-6 Sol (live compaction item verified on Codex OAuth;
+5.1/5.2 fail server-side without structured rejection) on direct OpenAI routes. The local compressor
 stays armed as fallback (native threshold clamped below the local trigger); compaction items
 ride the ``codex_reasoning_items`` sidecar. No transport imports (shared gate, no cycles).
 """
@@ -23,13 +23,14 @@ logger = logging.getLogger(__name__)
 LOCAL_TRIGGER_SAFETY_MARGIN = 8_192
 # Fallback when automatic mode has no local trigger to follow.
 DEFAULT_COMPACT_THRESHOLD = 200_000
-# Substring match so dated snapshots and variants (gpt-5.6-mini) stay eligible.
-_ELIGIBLE_MODEL_MARKER = "gpt-5.6"
+# Substring match so dated snapshots and 900K variants stay eligible.
+_ELIGIBLE_MODEL_MARKERS = ("gpt-5.6", "gpt-6-sol")
 
 
 def is_native_compaction_model(model: Optional[str]) -> bool:
-    """True when the model is in the gpt-5.6 family."""
-    return _ELIGIBLE_MODEL_MARKER in (model or "").lower()
+    """True for the verified native-compaction model families."""
+    name = (model or "").lower()
+    return any(marker in name for marker in _ELIGIBLE_MODEL_MARKERS)
 
 
 def resolve_native_compaction_capabilities(

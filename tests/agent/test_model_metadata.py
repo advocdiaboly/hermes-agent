@@ -693,6 +693,11 @@ class TestCodexOAuthContextLength:
         ("gpt-5.6-sol-900k",              True,  900_000, "gpt-5.6-sol"),
         ("gpt-5.6-terra-900k",            True,  900_000, "gpt-5.6-terra"),
         ("gpt-5.6-luna-900k",             True,  900_000, "gpt-5.6-luna"),
+        ("gpt-6-sol-900k",                True,  900_000, "gpt-6-sol"),
+        ("gpt-6-luna-900k",               True,  900_000, "gpt-6-luna"),
+        ("gpt-6-sol",                    False, 272_000, "gpt-6-sol"),
+        ("gpt-6-luna",                   False, 272_000, "gpt-6-luna"),
+        ("gpt-6-sol-pro-900k",           False, 272_000, "gpt-6-sol-pro-900k"),
         ("gpt-5.4-900k",                  True,  900_000, "gpt-5.4"),
         ("gpt-daybreak-blue-latest-900k", True,  900_000, "gpt-daybreak-blue-latest"),
         # dated snapshot of a routable 5.6 base
