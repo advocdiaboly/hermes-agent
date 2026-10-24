@@ -156,10 +156,11 @@ def build_profile_terminal_scope(
         raise TerminalPolicyUnavailable(f"cannot resolve terminal config in {home}: {exc}") from exc
     if config_exists:
         from utils import load_yaml_file_readonly
+        from hermes_cli.config import _expand_env_vars
 
         try:
             # Signature-cached: a scope is rebuilt per routed turn/poll, the file rarely changes.
-            raw = load_yaml_file_readonly(config_path)
+            raw = _expand_env_vars(load_yaml_file_readonly(config_path))
         except Exception as exc:
             raise TerminalPolicyUnavailable(f"cannot parse {config_path}: {exc}") from exc
         raw_terminal = raw.get("terminal") if isinstance(raw, dict) else None

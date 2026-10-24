@@ -32,9 +32,10 @@ _ELIGIBLE_MODEL_MARKER = "gpt-5.6"
 def is_native_compaction_model(
     model: Optional[str], *, provider: Optional[str] = None, base_url: Optional[str] = None,
 ) -> bool:
-    """Preserve gpt-5.6 eligibility; Astra (``-900k`` is a picker alias of the same wire slug)
+    """Preserve gpt-5.6/Sol eligibility; Astra (``-900k`` is a picker alias of the same wire slug)
     additionally requires official Codex OAuth."""
-    return _ELIGIBLE_MODEL_MARKER in (model or "").lower() or (
+    return (_ELIGIBLE_MODEL_MARKER in (model or "").lower()
+            or (model or "").lower().startswith(("gpt-6-sol", "gpt-6.1-sol"))) or (
         is_astra_model(model)
         and (provider or "").strip().lower() == "openai-codex"
         and is_official_codex_base_url(base_url or "")

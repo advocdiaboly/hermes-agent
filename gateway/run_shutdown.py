@@ -1976,6 +1976,9 @@ class GatewayShutdownMixin(GatewaySessionEndMixin):
                     _entry[0] if isinstance(_entry, tuple) else _entry, context="shutdown idle-cache",
                     session_key=_key,
                 )
+        from gateway.telegram_topic_lifecycle import cancel_gateway_telegram_lifecycle_tasks
+
+        await cancel_gateway_telegram_lifecycle_tasks(self)
         # Settle completion flush tasks while adapters are alive so every watcher gets a retryable result.
         cancel_completion_batches = getattr(self, "_cancel_process_completion_batch_tasks", None)
         if cancel_completion_batches is not None:

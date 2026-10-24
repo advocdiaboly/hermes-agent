@@ -7,6 +7,7 @@ retries, fallbacks, compression, post-turn hooks). Symbols that callers patch on
 
 from __future__ import annotations
 
+import functools
 import inspect
 import json
 import logging
@@ -1768,6 +1769,35 @@ def run_conversation(
 
 _FAILED_TURN_ERROR_MAX_CHARS = 2000
 
+_run_conversation_impl = run_conversation
+
+
+@functools.wraps(_run_conversation_impl)
+def _run_conversation_with_telemetry(agent, user_message: Any, *args: Any, **kwargs: Any) -> dict[str, Any]:
+    """Finalize best-effort per-turn telemetry on every exit path."""
+    try:
+        from agent.tool_search_telemetry import begin_turn_scope, end_turn_scope, finish_current_turn
+
+        scope_token = begin_turn_scope()
+    except Exception:
+        logger.debug("tool-search telemetry setup failed; running uninstrumented", exc_info=True)
+        return _run_conversation_impl(agent, user_message, *args, **kwargs)
+    try:
+        result = _run_conversation_impl(agent, user_message, *args, **kwargs)
+    except BaseException as exc:
+        finish_current_turn(exception=exc)
+        raise
+    else:
+        finish_current_turn(result)
+        return result
+    finally:
+        end_turn_scope(scope_token)
+
+
+run_conversation = _run_conversation_with_telemetry
+
+
+__all__ = ["run_conversation"]
 
 def _failed_turn_display_metadata(agent, result: dict) -> dict:
     """The error text and ``error_surface`` a client needs to redraw the failed turn's error
