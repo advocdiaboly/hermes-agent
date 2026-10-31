@@ -426,6 +426,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from gateway.config import Platform, PlatformConfig
 from gateway.platforms.helpers import fence_state_after
 from gateway.platforms.base_exec_approval import (
+    render_exec_approval,
     approval_timeout_seconds, ea_action_labels, ea_default_reason_text, ea_header_text,
     ea_reason_label_text, ea_smart_deny_line_text, format_approval_deadline_line)
 from gateway.platforms.event import MessageEvent, MessageType, ProcessingOutcome
@@ -1690,6 +1691,8 @@ class ExecApprovalPrompt:
     description: str
     smart_denied: bool
     metadata: Optional[dict[str, Any]] = None
+    summary: Optional[str] = None
+    summary_language: Optional[str] = None
 
     @property
     def choices(self) -> list[str]:
@@ -2844,22 +2847,12 @@ class BasePlatformAdapter(ABC):
         """The "doing nothing means it will NOT run" line, with the configured approvals.timeout."""
         return self._EA_DEADLINE_PREFIX + self._ea_escape(format_approval_deadline_line(approval_timeout_seconds()))
 
-    def _format_exec_approval(
-        self, command: str, description: Optional[str] = None, smart_denied: bool = False) -> str:
-        """Shared exec-approval prompt text: header + fenced (truncated) command + why it was
-        flagged + the deadline line, plus the smart-deny line. Buttons/trailing instructions stay
-        platform-local. ``description=None`` renders the localized default reason."""
-        if description is None:
-            description = ea_default_reason_text()
-        if self._EA_REASON_BUDGET:
-            description = self._ea_fit(str(description or ""), self._EA_REASON_BUDGET)
-        cmd_preview = self._ea_fit(
-            str(command or ""), self._exec_approval_cmd_budget(description, smart_denied))
-        text = (f"{self._EA_HEADER}"
-                f"{self._EA_CODE_OPEN}{self._ea_escape(cmd_preview)}{self._EA_CODE_CLOSE}"
-                f"{self._EA_REASON_LABEL}{self._ea_escape(description)}"
-                f"{self._ea_deadline_line()}")
-        return text + self._EA_SMART_DENY_LINE if smart_denied else text
+    def _format_exec_approval(self, command: str, description: Optional[str] = None,
+                              smart_denied: bool = False, *, summary: Optional[str] = None,
+                              language: Optional[str] = None) -> str:
+        """Delegate shared rendering without mixing presentation and command identity."""
+        return render_exec_approval(self, command, description, smart_denied,
+                                    summary=summary, language=language)
 
     # ── Exec-approval prompt (template method). The choice set is one rule for every button
     # surface — three separate "same fix × N adapters" commits motivated lifting it here.
@@ -2870,7 +2863,8 @@ class BasePlatformAdapter(ABC):
         return ea_action_labels()
 
     def _exec_approval_actions(
-            self, *, allow_permanent: bool, allow_session: bool, smart_denied: bool) -> list[tuple[str, str, str]]:
+            self, *, allow_permanent: bool, allow_session: bool, smart_denied: bool,
+            language: Optional[str] = None) -> list[tuple[str, str, str]]:
         """``(label, choice, style)`` rows for the approval buttons. A smart deny is an owner
         override for one operation only, so it offers neither the session nor the permanent tier;
         the permanent tier is never offered without the session tier."""
@@ -2880,7 +2874,8 @@ class BasePlatformAdapter(ABC):
             if allow_permanent:
                 choices.append("always")
         choices.append("deny")
-        return [(self._EA_ACTION_LABELS[c], c, self._EA_ACTION_STYLES.get(c, "")) for c in choices]
+        labels = ea_action_labels(language) if language else self._EA_ACTION_LABELS
+        return [(labels[c], c, self._EA_ACTION_STYLES.get(c, "")) for c in choices]
 
     @classmethod
     def supports_exec_approval_buttons(cls) -> bool:
@@ -2892,6 +2887,7 @@ class BasePlatformAdapter(ABC):
         self, chat_id: str, command: str, session_key: str, description: Optional[str] = None,
         metadata: Optional[dict[str, Any]] = None, allow_permanent: bool = True, allow_session: bool = True,
         smart_denied: bool = False,
+        *, summary: Optional[str] = None, summary_language: Optional[str] = None,
     ) -> SendResult:
         """Interactive exec-approval prompt; a press resolves via
         ``tools.approval.resolve_gateway_approval``. Text and choice set are shared; adapters
@@ -2901,9 +2897,12 @@ class BasePlatformAdapter(ABC):
         prompt = ExecApprovalPrompt(
             chat_id=chat_id, session_key=session_key, metadata=metadata, command=str(command or ""),
             description=description, smart_denied=smart_denied,
-            text=self._format_exec_approval(command, description, smart_denied),
+            summary=summary, summary_language=summary_language,
+            text=self._format_exec_approval(command, description, smart_denied,
+                                            summary=summary, language=summary_language),
             actions=self._exec_approval_actions(
-                allow_permanent=allow_permanent, allow_session=allow_session, smart_denied=smart_denied))
+                allow_permanent=allow_permanent, allow_session=allow_session, smart_denied=smart_denied,
+                language=summary_language if summary is not None else None))
         return await self._send_exec_approval_prompt(prompt)
 
     async def _send_exec_approval_prompt(self, prompt: ExecApprovalPrompt) -> SendResult:

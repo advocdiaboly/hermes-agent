@@ -706,12 +706,15 @@ def execute_code(
     task_id: Optional[str] = None,
     enabled_tools: Optional[list[str]] = None,
     reset: bool = False,
+    approval_reason: str | None = None,
 ) -> str:
     """Run Python in the session's persistent kernel (local) or on the remote terminal backend,
     with RPC access to a subset of Hermes tools; returns the JSON result string. "Sandbox" means
     the security envelope (env scrubbing, tool whitelist + call budget, output redaction), not an
     isolation jail: default `project` mode runs in the session's cwd with the project venv.
     ``enabled_tools`` ∩ SANDBOX_ALLOWED_TOOLS; ``reset`` kills the existing kernel first."""
+    if approval_reason is not None and (not isinstance(approval_reason, str) or not approval_reason.strip()):
+        return tool_error("approval_reason must be a non-empty string describing the intended effects")
     if not SANDBOX_AVAILABLE:
         return tool_error("execute_code sandbox is unavailable in this environment. "
                           "Use normal tool calls (terminal, read_file, write_file, ...) instead.")
@@ -771,7 +774,9 @@ def execute_code(
     # the session context. A Docker sandbox with host bind mounts gets no container fast-path.
     # See #30882.
     from tools.approval import check_execute_code_guard
-    _guard = check_execute_code_guard(code, env_type, has_host_access=_docker_has_host_access(_env_config))
+    _guard = check_execute_code_guard(
+        code, env_type, has_host_access=_docker_has_host_access(_env_config),
+        **({"approval_reason": approval_reason} if approval_reason is not None else {}))
     if not _guard.get("approved", False):
         return _error_result(_guard.get("message") or "execute_code blocked by approval guard.",
                              user_summary=_guard.get("user_summary"))
@@ -934,10 +939,14 @@ def build_execute_code_schema(enabled_sandbox_tools: set | None = None,
                     "Python code to execute. Import tools with "
                     f"`from hermes_tools import {import_str}` "
                     "and print your final result to stdout.")},
+                "approval_reason": {"type": "string", "minLength": 1, "description": (
+                    "Concise declared plan in the user\'s language: purpose, concrete intended targets and effects, "
+                    "and known limits from the current task/preparation results. It is not permission or proof of safety. "
+                    "Never include secrets or claim unobserved facts.")},
                 "reset": {"type": "boolean", "description": (
                     "Discard the kernel's persistent state and start fresh before running this code.")},
             },
-            "required": ["code"],
+            "required": ["code", "approval_reason"],
         },
     }
 
@@ -959,7 +968,8 @@ def _execute_code_handler(args: dict, **kwargs) -> str:
         return tool_error(f"execute_code received a {type(code).__name__} in 'code', but it "
                           "requires Python source as a string. Retry as execute_code(code=\"...\").")
     return execute_code(code=code or "", task_id=kwargs.get("task_id"),
-                        enabled_tools=kwargs.get("enabled_tools"), reset=bool(args.get("reset", False)))
+                        enabled_tools=kwargs.get("enabled_tools"), reset=bool(args.get("reset", False)),
+                        **({"approval_reason": args["approval_reason"]} if "approval_reason" in args else {}))
 
 
 registry.register(

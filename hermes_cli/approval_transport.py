@@ -17,7 +17,7 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass
-from typing import Awaitable, Callable, Literal
+from typing import Awaitable, Callable, ClassVar, Literal
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +41,8 @@ class ApprovalDecision:
 class ApprovalRequest:
     """Immutable, display-only approval request passed to a transport plugin."""
 
+    supports_summary: ClassVar[bool] = True
+
     schema_version: int
     request_id: str
     digest: str
@@ -51,13 +53,16 @@ class ApprovalRequest:
     surface: str
     timeout_seconds: float
     allowed_choices: tuple[ApprovalChoice, ...]
+    approval_reason: str | None = None
 
     @classmethod
     def create(
         cls, *, command: str, description: str, pattern_key: str, pattern_keys: tuple[str, ...],
         session_key: str, surface: str, allow_session: bool, allow_permanent: bool,
-        timeout_seconds: float = 300,
+        timeout_seconds: float = 300, approval_reason: str | None = None,
     ) -> ApprovalRequest:
+        if approval_reason is not None and not isinstance(approval_reason, str):
+            raise TypeError("approval_reason must be a string or None")
         choices: list[ApprovalChoice] = ["once"]
         if allow_session:
             choices.append("session")
@@ -69,6 +74,8 @@ class ApprovalRequest:
             description=description, pattern_key=pattern_key, pattern_keys=list(pattern_keys),
             surface=surface, timeout_seconds=timeout_seconds, allowed_choices=choices,
         )
+        if approval_reason is not None:
+            fields["approval_reason"] = approval_reason
         canonical = json.dumps({**fields, "session_key": session_key}, sort_keys=True, separators=(",", ":"))
         digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
         return cls(**{**fields, "pattern_keys": pattern_keys, "allowed_choices": tuple(choices)}, digest=digest)

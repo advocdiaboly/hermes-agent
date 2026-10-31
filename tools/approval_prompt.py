@@ -8,8 +8,10 @@ persistence, timeout policy and the final authorization stay host-owned in
 
 import logging
 import os
+import re
 import sys
 import threading
+import unicodedata
 from tools import approval_context as _ctx, approval_gateway_wait as _gw
 from tools.approval_human_wait import activity_heartbeat, human_wait_window
 from tools.interrupt import is_interrupted
@@ -196,9 +198,23 @@ def _attempt(name: str, choice, failure, fallback) -> dict:
     return {"selected": True, "choice": choice, "failure": failure, "fallback": fallback, "name": name}
 
 
+def prepare_approval_reason(reason: str | None) -> str | None:
+    """Bound untrusted presentation metadata; it is never an authorization input."""
+    if reason is None:
+        return None
+    if not isinstance(reason, str):
+        raise TypeError("approval_reason must be a string")
+    from agent.redact import redact_sensitive_text
+    safe = redact_sensitive_text(reason, force=True, redact_url_credentials=True)
+    safe = "".join(c for c in safe if c == "\n" or unicodedata.category(c) not in {"Cc", "Cf"})
+    safe = re.sub(r"(?<!\w)/+(?=(?:approve|deny|yolo|stop)(?:\b|_))", "", safe, flags=re.IGNORECASE).strip()
+    return (safe[:1000] + "…" if len(safe) > 1000 else safe) or None
+
+
 def _present_with_selected_transport(*, command: str, description: str, pattern_key: str,
                                      pattern_keys: list[str], session_key: str, surface: str,
-                                     allow_session: bool, allow_permanent: bool) -> dict:
+                                     allow_session: bool, allow_permanent: bool,
+                                     approval_reason: str | None = None) -> dict:
     """Present through an explicitly selected plugin transport, if any. A selected
     transport replaces every built-in prompt surface; detection, allowed scopes,
     persistence, timeout, and final authorization stay host-owned. A failed
@@ -228,6 +244,7 @@ def _present_with_selected_transport(*, command: str, description: str, pattern_
             description=redact_sensitive_text(description, force=True), pattern_key=pattern_key,
             pattern_keys=tuple(pattern_keys), session_key=session_key, surface=surface, allow_session=allow_session,
             allow_permanent=allow_permanent, timeout_seconds=timeout_seconds,
+            **({"approval_reason": prepare_approval_reason(approval_reason)} if approval_reason is not None else {}),
         )
     except Exception:
         # Never fall back to raw text if redaction or request construction fails:

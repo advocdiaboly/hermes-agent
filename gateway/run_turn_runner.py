@@ -25,7 +25,7 @@ from agent.replay_cleanup import canonicalize_replay_history
 from gateway.config import Platform
 from gateway.media_repair import repair_explicit_computer_use_media_paths
 from gateway.platforms.base import BasePlatformAdapter
-from gateway.platforms.base_exec_approval import ea_default_reason_text
+from gateway.platforms.base_exec_approval import prepare_exec_approval_display
 from gateway.turn_context import TurnContext
 from hermes_cli.config import cfg_get
 from utils import is_truthy_value
@@ -1465,16 +1465,14 @@ class TurnRunner:
         adapter.pause_typing_for_chat(ctx._status_chat_id)
         self._close_native_stream_boundary("Approval")
         # Redact credentials before display: the raw command string can carry secrets. Both the button and plain-text paths use this value.
-        cmd = _redact_approval_command(approval_data.get("command", ""))
-        desc = approval_data.get("description") or ea_default_reason_text()
-        flags = {k: approval_data.get(k, d) for k, d in (("allow_permanent", True), ("allow_session", True), ("smart_denied", False))}
+        cmd, desc, flags, presentation = prepare_exec_approval_display(approval_data, _redact_approval_command, adapter)
         # Check the *class*, not the instance — MagicMock auto-creates attributes in tests.
         if _renders_exec_approval_buttons(type(adapter)):
             try:
                 fut = self._schedule(
                     adapter.send_exec_approval(
                         chat_id=ctx._status_chat_id, command=cmd, session_key=ctx.session_key or "",
-                        description=desc, metadata=ctx._status_thread_metadata, **flags,
+                        description=desc, metadata=ctx._status_thread_metadata, **flags, **presentation,
                     ),
                     "send_exec_approval scheduling error",
                 )
@@ -1485,7 +1483,7 @@ class TurnRunner:
                     # Without this, a card whose timer runs out keeps live buttons and nobody
                     # learns the command did NOT run (only the TUI registered a settle hook).
                     register_timeout_notice(
-                        self, approval_data, command=cmd,
+                        self, approval_data, command=presentation.get("summary", cmd),
                         card_message_id=getattr(fut.result(timeout=0), "message_id", None))
                     return
                 if outcome == "ambiguous":
@@ -1533,7 +1531,7 @@ class TurnRunner:
                 logger.warning("Button-based approval failed, falling back to text: %s", e)
         # Plain-text prompt with the adapter's typed prefix (e.g. `!approve`): typed "/" is blocked
         # in Slack threads and reserved by Matrix clients.
-        msg = _format_exec_approval_fallback(cmd, desc, getattr(adapter, "typed_command_prefix", "/"), **flags)
+        msg = _format_exec_approval_fallback(presentation.get("summary", cmd), desc, getattr(adapter, "typed_command_prefix", "/"), **flags)
         try:
             # Mark as approval prompt: WeCom routes it through the control lane and Telegram pushes it
             # in "important" mode (#132516). Never ``notify`` — A2A reads that as the turn-final reply.
@@ -1545,7 +1543,7 @@ class TurnRunner:
                 fut.result(timeout=15)
                 # No card to edit on the text path: the prompt has no buttons to drop and carries
                 # the /approve instructions, so the timeout notice is posted as a new message.
-                register_timeout_notice(self, approval_data, command=cmd, card_message_id=None)
+                register_timeout_notice(self, approval_data, command=presentation.get("summary", cmd), card_message_id=None)
         except Exception as e:
             logger.error("Failed to send approval request: %s", e)
 

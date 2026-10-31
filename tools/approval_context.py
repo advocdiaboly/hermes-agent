@@ -274,7 +274,7 @@ def _get_approval_timeout() -> int:
     return min(raw, safe_cap)
 
 
-def format_approval_window(seconds: int) -> str:
+def format_approval_window(seconds: int, *, lang: str | None = None) -> str:
     """The ONE human wording for an approval timeout window, shared by the CLI timeout notice,
     the tool result's ``user_summary`` and the gateway card copy so every surface agrees:
     300 → "5 minutes", 90 → "90 seconds", 7200 → "2 hours"."""
@@ -285,7 +285,7 @@ def format_approval_window(seconds: int) -> str:
         count, unit = seconds // 60, "minute"
     else:
         count, unit = seconds, "second"
-    return t(f"approval.window.{unit}_one" if count == 1 else f"approval.window.{unit}_other", count=count)
+    return t(f"approval.window.{unit}_one" if count == 1 else f"approval.window.{unit}_other", lang=lang, count=count)
 
 
 def approval_timeout_notice_kwargs() -> dict:

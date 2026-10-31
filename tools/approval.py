@@ -36,7 +36,9 @@ from tools.approval_floors import (
     _user_deny_block_result,
 )
 from tools.approval_gateway_wait import _await_gateway_decision
-from tools.approval_prompt import _present_with_selected_transport, _transport_choice, prompt_dangerous_approval
+from tools.approval_prompt import (
+    _present_with_selected_transport, _transport_choice, prepare_approval_reason, prompt_dangerous_approval,
+)
 from tools.approval_smart import _smart_verdict
 
 logger = logging.getLogger(__name__)
@@ -773,7 +775,8 @@ def _smart_gate(spec: _GateSpec, command: str, description: str, pattern_key: st
 def _human_decision(spec: _GateSpec, *, command: str, description: str,
                     pattern_key: str, pattern_keys: list[str],
                     session_key: str, approval_callback, is_cli: bool, is_gateway: bool,
-                    is_ask: bool, smart: bool = False, pending_body=None) -> dict:
+                    is_ask: bool, smart: bool = False, pending_body=None,
+                    approval_reason: str | None = None) -> dict:
     """Ask a human (after the optional guardian-LLM step) and turn the answer into the gate result.
 
     ``pattern_keys`` are what :func:`_persist_choice` stores on session/always; a smart-DENY
@@ -814,6 +817,7 @@ def _human_decision(spec: _GateSpec, *, command: str, description: str,
             command=command, description=description, pattern_key=pattern_key, pattern_keys=pattern_keys,
             session_key=session_key, surface="gateway" if (is_gateway or is_ask) else "cli",
             allow_session=not smart_denied, allow_permanent=allow_permanent,
+            **({"approval_reason": approval_reason} if approval_reason is not None else {}),
         )
         choice, denied = _transport_choice(attempt, pattern_key=pattern_key, description=description)
         if denied is not None:
@@ -843,6 +847,7 @@ def _human_decision(spec: _GateSpec, *, command: str, description: str,
             }
             if smart_denied:
                 data["smart_denied"] = True
+            data["approval_reason"] = prepare_approval_reason(approval_reason)
             decision = _await_gateway_decision(session_key, notify_cb, data, surface="gateway")
             if decision.get("notify_failed"):
                 return _denied(spec.notify_failed, pattern_key=pattern_key,
@@ -1177,7 +1182,8 @@ _EXECUTE_CODE_DESCRIPTION = (
 )
 
 
-def check_execute_code_guard(code: str, env_type: str, has_host_access: bool = False) -> dict:
+def check_execute_code_guard(code: str, env_type: str, has_host_access: bool = False, *,
+                             approval_reason: str | None = None) -> dict:
     """Approve an execute_code script before its child process is spawned.
 
     The script can call ``subprocess``/``os.system``/``ctypes`` directly, none of which pass
@@ -1244,6 +1250,7 @@ def check_execute_code_guard(code: str, env_type: str, has_host_access: bool = F
         approval_callback=approval_callback, is_cli=is_cli, is_gateway=is_gateway, is_ask=is_ask,
         smart=approval_mode == "smart",
         pending_body=lambda: f"**Code:**\n```python\n{redact_sensitive_text(code)}\n```",
+        **({"approval_reason": approval_reason} if approval_reason is not None else {}),
     )
 
 
